@@ -1,0 +1,7 @@
+.DS_Store
+*.pdf
+*.xlsx
+*.png
+*.jpg
+*.jpeg
+.env
