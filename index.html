@@ -113,7 +113,7 @@ details summary{cursor:pointer;color:var(--sub);font-size:13px}
 </head>
 <body>
 <header>
-  <h1>PDF／圖片轉 Excel<span class="ver">v1.3.0</span></h1>
+  <h1>PDF／圖片轉 Excel<span class="ver">v1.4.0</span></h1>
   <p class="privacy">🔒 檔案只在您自己的瀏覽器裡處理，不會上傳到任何地方。</p>
 </header>
 <main>
@@ -144,9 +144,9 @@ details summary{cursor:pointer;color:var(--sub);font-size:13px}
           </select>
         </label>
         <label>列對齊：
-          <select id="rowSel" title="某一欄整個比別欄低一點、或同一格有兩行字，導致一列被拆成好幾列時，改用「寬鬆」">
-            <option value="std" selected>標準</option>
-            <option value="loose">寬鬆（欄位高低不齊、一格兩行）</option>
+          <select id="rowSel" title="寬鬆：上下位置有重疊的字算同一列，同一格的兩行字會接在同一格；標準：高度相近的字才算同一列">
+            <option value="loose" selected>寬鬆（預設：欄位高低不齊、一格兩行都能對齊）</option>
+            <option value="std">標準（一行字一列）</option>
           </select>
         </label>
         <label><input type="checkbox" id="normChk" checked> 自動修正相似字（如「⽔」→「水」）</label>
@@ -844,45 +844,62 @@ function buildRows(tab){
   tab.pairHits = pairHits;
   tab.offsetHint = pairHits >= 3 && pairHits >= rowCells.length * 0.3;
 
-  // 靠右對齊的數字欄（金額、數量、單價）：數字位數不同，左邊緣會參差不齊，會被誤認成好幾欄。
-  // 先依「右邊緣」把數字格子分群，每一群當成同一欄（把左邊緣視為一致）
-  {
-    const tolR = Hall * 0.9;
-    const nums = [];
-    for (const r of rowCells) for (const c of r.cells) if (isNumText(c.t.replace(/\s/g, ''))) nums.push(c);
-    nums.sort((a, b) => a.x1 - b.x1);
-    const clusters = [];
-    for (const c of nums){
-      const last = clusters[clusters.length - 1];
-      if (last && c.x1 - last.cells[last.cells.length - 1].x1 <= tolR) last.cells.push(c); else clusters.push({ cells: [c] });
-    }
-    for (const cl of clusters){
-      if (cl.cells.length < 3) continue;
-      const xr = median(cl.cells.map(c => c.x1)), mw = median(cl.cells.map(c => c.x1 - c.x0));
-      for (const c of cl.cells){ c.x0 = xr - mw; }     // 左邊緣視為「典型寬度」處，和標題文字的位置大致對得上
-    }
-  }
-
-  // 欄位對齊：把各列格子的起始位置群聚成「欄」
+  // 欄位偵測：每一欄可能是靠左、置中或靠右對齊。
+  // 分別用「左邊緣、中心、右邊緣」把格子群聚，每次挑出格子最多的一群當成一欄，重複到沒有為止；
+  // 剩下沒歸類的格子（例如標題、單獨一格）依左右範圍的重疊決定放哪一欄
   const tol = Hall * 0.8;
-  const xs = rowCells.flatMap(r => r.cells.map(c => c.x0)).sort((a, b) => a - b);
-  const groups = [];
-  for (const x of xs){
-    const g = groups[groups.length - 1];
-    if (g && x - g.last <= tol){ g.xs.push(x); g.last = x; } else groups.push({ xs: [x], last: x });
-  }
+  const allCells = rowCells.flatMap(r => r.cells);
   const minSupport = rowCells.length <= 3 ? 1 : Math.max(2, Math.ceil(rowCells.length * 0.08));
-  let anchors = groups.filter(g => g.xs.length >= minSupport).map(g => median(g.xs));
-  if (!anchors.length && groups.length) anchors = [median(groups[0].xs)];
-  if (groups.length && anchors[0] > groups[0].xs[0] + tol) anchors.unshift(median(groups[0].xs));
+  const keyOf = { L: c => c.x0, C: c => (c.x0 + c.x1) / 2, R: c => c.x1 };
+  const colOf = new Map(), cols = [];
+  {
+    const left = new Set(allCells);
+    for (;;){
+      let best = null;
+      for (const key of ['L', 'C', 'R']){
+        const arr = [...left].sort((a, b) => keyOf[key](a) - keyOf[key](b));
+        let g = null;
+        const clusters = [];
+        for (const c of arr){
+          const v = keyOf[key](c);
+          if (g && v - g.last <= tol){ g.cells.push(c); g.last = v; } else { g = { cells: [c], last: v }; clusters.push(g); }
+        }
+        for (const cl of clusters) if (cl.cells.length >= minSupport && (!best || cl.cells.length > best.cells.length)) best = cl;
+      }
+      if (!best) break;
+      best.cells.forEach(c => left.delete(c));
+      cols.push({ cells: best.cells });
+    }
+    if (!cols.length) cols.push({ cells: [] });
+    for (const k of cols){
+      k.lo = k.cells.length ? median(k.cells.map(c => c.x0)) : 0;
+      k.hi = k.cells.length ? median(k.cells.map(c => c.x1)) : 0;
+    }
+    cols.sort((a, b) => (a.lo + a.hi) - (b.lo + b.hi));
+    cols.forEach((k, i) => k.cells.forEach(c => colOf.set(c, i)));
+    for (const c of left){
+      const ov = cols.map(k => Math.min(c.x1, k.hi) - Math.max(c.x0, k.lo));
+      let pick = -1;
+      const hit = ov.map((v, i) => [v, i]).filter(x => x[0] > 0);
+      if (hit.length){
+        const w = c.x1 - c.x0;
+        // 很寬的格子（跨好幾欄的整段文字）放在它起頭的那一欄；其餘放重疊最多的那一欄
+        pick = (w > 2 * Math.max(1, cols[hit[0][1]].hi - cols[hit[0][1]].lo)) ? hit[0][1] : hit.sort((x, y) => y[0] - x[0])[0][1];
+      } else {
+        const mid = (c.x0 + c.x1) / 2;
+        let bd = Infinity;
+        cols.forEach((k, i) => { const d = Math.abs(mid - (k.lo + k.hi) / 2); if (d < bd){ bd = d; pick = i; } });
+      }
+      colOf.set(c, pick);
+    }
+  }
 
   const out = [];
-  let ncols = Math.max(1, anchors.length);
+  let ncols = Math.max(1, cols.length);
   for (const r of rowCells){
     const arr = [];
     for (const c of r.cells){
-      let col = 0;
-      for (let k = 0; k < anchors.length; k++){ if (anchors[k] <= c.x0 + tol) col = k; }
+      let col = colOf.get(c) || 0;
       while (arr[col]) col++;
       // 圖片辨識常把千分位的逗號讀成句點（1,850 → 1.850、1,540.00 → 1.540.00）：
       // 開啟「句點改千分位逗號」就自動改回，並標成沒把握（波浪底線）請核對；沒開的話就只標沒把握，匯出時不轉成數字
@@ -1023,7 +1040,7 @@ function detectMerges(tab){
       if (idx.length < 4) continue;
       const labels = idx.filter(i => rows[i].cells[c].t.trim());
       if (labels.length < 2 || labels.length > idx.length * 0.45) continue;
-      if (labels.some(i => { const x = rows[i].cells[c].t.trim(); return x.length > 14 || isNumText(x); })) continue;
+      if (labels.some(i => { const x = rows[i].cells[c].t.trim(); return x.length > 14 || isNumText(x) || /^[\d\s./:\-年月日]+$/.test(x); })) continue;
       const last = idx[idx.length - 1];
       let start = idx[0];
       for (let k = 0; k < labels.length; k++){
@@ -1082,9 +1099,9 @@ function renderNotes(){
     d.innerHTML = `⚠️ 第 ${ocrPages.join('、')} 頁是圖片，已用文字辨識。<b>辨識可能出錯，請對照「原件對照」裡的原圖逐項核對，尤其是數字與金額</b>（例如 1 與 7、0 與 8 容易認錯）。有<u style="text-decoration:underline wavy var(--warn-line)">波浪底線</u>的格子是系統比較沒把握的。`;
     box.appendChild(d);
   }
-  if (t.offsetHint && $('rowSel').value !== 'loose'){
+  if (t.offsetHint && $('rowSel').value === 'std'){
     const d = document.createElement('div'); d.className = 'notice warn';
-    d.innerHTML = '⚠️ 這份看起來有某一欄比別欄低一點，同一列被拆成好幾列。可以試試上方「列對齊」改成<b>寬鬆</b>，不好再改回標準。';
+    d.innerHTML = '⚠️ 這份看起來有某一欄比別欄低一點，同一列被拆成好幾列。可以試試上方「列對齊」改成<b>寬鬆</b>。';
     box.appendChild(d);
   }
   if (t.unitCol != null){
