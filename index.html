@@ -53,7 +53,7 @@ th,td{border:1px solid var(--line);padding:.36em .57em;vertical-align:top;font-s
 th{background:var(--th);position:sticky;top:0;z-index:2;font-weight:600;white-space:nowrap}
 td.rn{background:var(--th);position:sticky;left:0;z-index:1;white-space:nowrap;text-align:center;padding:.14em .28em}
 table{user-select:none;-webkit-user-select:none}
-td.c{min-width:5em;outline:none;cursor:cell}
+td.c{min-width:5em;outline:none;cursor:cell;white-space:pre-wrap}
 td.c.sel{background:var(--sel)}
 td.c.anchor{box-shadow:inset 0 0 0 2px var(--selline)}
 td.c.editing{user-select:text;-webkit-user-select:text;cursor:text;background:var(--card)!important;box-shadow:inset 0 0 0 2px var(--brand)}
@@ -112,7 +112,7 @@ details summary{cursor:pointer;color:var(--sub);font-size:13px}
 </head>
 <body>
 <header>
-  <h1>PDF／圖片轉 Excel<span class="ver">v1.1.2</span></h1>
+  <h1>PDF／圖片轉 Excel<span class="ver">v1.1.3</span></h1>
   <p class="privacy">🔒 檔案只在您自己的瀏覽器裡處理，不會上傳到任何地方。</p>
 </header>
 <main>
@@ -140,6 +140,12 @@ details summary{cursor:pointer;color:var(--sub);font-size:13px}
             <option value="0.5">細（分更多欄）</option>
             <option value="0.9" selected>標準</option>
             <option value="1.6">粗（分較少欄）</option>
+          </select>
+        </label>
+        <label>列對齊：
+          <select id="rowSel" title="某一欄整個比別欄低一點、或同一格有兩行字，導致一列被拆成好幾列時，改用「寬鬆」">
+            <option value="std" selected>標準</option>
+            <option value="loose">寬鬆（欄位高低不齊、一格兩行）</option>
           </select>
         </label>
         <label><input type="checkbox" id="normChk" checked> 自動修正相似字（如「⽔」→「水」）</label>
@@ -446,7 +452,7 @@ function whitenFills(g, W, H, Hc){
 }
 // 擦掉表格的長橫線與長直線（有格線的報價單），避免被當成文字
 function eraseLines(g, W, H, Hc){
-  const T = 150, minH = Math.round(Hc * 4), minV = Math.round(Hc * 2.4);
+  const T = 205, minH = Math.round(Hc * 4), minV = Math.round(Hc * 2.4);
   const kill = new Uint8Array(W * H);
   for (let y = 0; y < H; y++){
     let x = 0;
@@ -506,7 +512,8 @@ function xyCut(g, W, H, Hc, kill){
   }
   rec(0, 0, W, H, 0);
   // 太小的墨點（污點、單獨的標點）丟掉；但窄的數字（例如序號 1）要留下
-  return leaves.filter(l => (l.y1 - l.y0) >= Hc * 0.45 && (l.x1 - l.x0) >= Hc * 0.12);
+  // 又細又長的直條（沒擦乾淨的線、圖片邊框）也不是字
+  return leaves.filter(l => (l.y1 - l.y0) >= Hc * 0.45 && (l.x1 - l.x0) >= Hc * 0.12 && !((l.y1 - l.y0) > Hc * 1.5 && (l.x1 - l.x0) < Hc * 0.35));
 }
 
 /* ========== 文字辨識（OCR） ========== */
@@ -588,15 +595,19 @@ async function ocrByBlocks(w, canvas, scale, pageNo, label){
     const lc = document.createElement('canvas'); lc.width = cw; lc.height = ch;
     const lx = lc.getContext('2d'); const id = lx.createImageData(cw, ch);
     id.data.fill(255);
-    let ink = 0;
+    let ink = 0, mn = 255;
+    for (let y = l.y0; y < l.y1; y++) for (let x = l.x0; x < l.x1; x++){ const v0 = g[y * W + x]; if (v0 < mn) mn = v0; }
+    const stretch = mn > 60 && mn < 200;     // 字是灰色的（不夠黑）：把對比拉開再辨識
     for (let y = l.y0; y < l.y1; y++) for (let x = l.x0; x < l.x1; x++){
-      const v = g[y * W + x], o = ((y - l.y0 + pad) * cw + (x - l.x0 + pad)) * 4;
+      let v = g[y * W + x]; const o = ((y - l.y0 + pad) * cw + (x - l.x0 + pad)) * 4;
+      if (stretch) v = Math.max(0, Math.min(255, (v - mn) * 255 / (225 - mn)));
       id.data[o] = id.data[o + 1] = id.data[o + 2] = v;
       if (v < 170) ink++;
     }
     // 像文字的才算：又細又實心的直條（擦線後殘留的線頭）不是字，讀不出來就直接略過，不留「□」
     const lw = l.x1 - l.x0, lh2 = l.y1 - l.y0;
     const textLike = lw >= Hc * 0.6 && ink / (lw * lh2) < 0.75;
+    if (lw < Hc * 0.4 && ink / (lw * lh2) > 0.7) continue;     // 又細又實心的短條（色塊邊角、線頭）：不是字
     lx.putImageData(id, 0, 0);
     // 讀到空白就換辦法再試：短字（如「單價」「運費」）有時縮小一點反而讀得出來
     const oneLine = (l.y1 - l.y0) < Hc * 1.8;
@@ -672,31 +683,86 @@ function buildRows(tab){
   const allH = items.map(i => i.h);
   const Hall = median(allH);
 
+  const loose = $('rowSel').value === 'loose';
+  let pairHits = 0;
   for (const pg of pages){
-    const its = items.filter(i => i.page === pg).sort((a, b) => a.cy - b.cy);
+    const its = items.filter(i => i.page === pg);
     const H = median(its.map(i => i.h));
-    const rows = [];
-    for (const it of its){
-      const last = rows[rows.length - 1];
-      if (last && Math.abs(it.cy - last.cy) <= Math.min(H, Math.max(it.h, last.h)) * 0.5){
-        last.items.push(it);
-        last.cy = (last.cy * (last.items.length - 1) + it.cy) / last.items.length;
-        last.h = Math.max(last.h, it.h);
-      } else rows.push({ cy: it.cy, h: it.h, items: [it] });
-    }
-    for (const r of rows){
-      r.items.sort((a, b) => a.x0 - b.x0);
+    const isOcr = its.some(i => i.conf != null);
+    const pageRows = [];
+    const cellsOf = line => {      // 同一行字：間距小的接成一格
+      line.sort((a, b) => a.x0 - b.x0);
       const cells = [];
-      for (const it of r.items){
+      for (const it of line){
         const cur = cells[cells.length - 1];
         if (cur && it.x0 - cur.x1 <= H * gapFactor){
           cur.t = joinStr(cur.t, it.str, it.x0 - cur.x1, H);
           cur.x1 = Math.max(cur.x1, it.x1); cur.conf = minConf(cur.conf, it.conf);
         } else cells.push({ x0: it.x0, x1: it.x1, t: it.str, conf: it.conf });
       }
-      rowCells.push({ page: pg, cells });
+      return cells;
+    };
+    if (!loose){
+      // 標準：高度相近的字排成一列
+      const sorted = its.slice().sort((a, b) => a.cy - b.cy);
+      const rows = [];
+      for (const it of sorted){
+        const last = rows[rows.length - 1];
+        if (last && Math.abs(it.cy - last.cy) <= Math.min(H, Math.max(it.h, last.h)) * 0.5){
+          last.items.push(it);
+          last.cy = (last.cy * (last.items.length - 1) + it.cy) / last.items.length;
+          last.h = Math.max(last.h, it.h);
+        } else rows.push({ cy: it.cy, h: it.h, items: [it] });
+      }
+      for (const r of rows) pageRows.push({ page: pg, cells: cellsOf(r.items), cy: r.cy });
+    } else {
+      // 寬鬆：上下範圍有重疊（容許多半行字）就是同一列。
+      // 用在「某一欄整個比別欄低一點」或「同一格有兩行字」的表格；同一格的兩行字會用換行接在同一格
+      const tol = isOcr ? H * 0.4 : 0;
+      const sorted = its.slice().sort((a, b) => (a.cy - a.h / 2) - (b.cy - b.h / 2));
+      const groups = [];
+      for (const it of sorted){
+        const top = it.cy - it.h / 2, bot = it.cy + it.h / 2;
+        const last = groups[groups.length - 1];
+        if (last && top <= last.bot + tol){ last.items.push(it); last.bot = Math.max(last.bot, bot); }
+        else groups.push({ items: [it], bot });
+      }
+      for (const g of groups){
+        g.items.sort((a, b) => a.cy - b.cy);
+        const lines = [];
+        for (const it of g.items){
+          const ln = lines[lines.length - 1];
+          if (ln && Math.abs(it.cy - ln.cy) <= Math.min(H, Math.max(it.h, ln.h)) * 0.5){
+            ln.items.push(it);
+            ln.cy = (ln.cy * (ln.items.length - 1) + it.cy) / ln.items.length;
+            ln.h = Math.max(ln.h, it.h);
+          } else lines.push({ cy: it.cy, h: it.h, items: [it] });
+        }
+        const merged = [];
+        for (const ln of lines){
+          for (const c of cellsOf(ln.items)){
+            const hit = merged.find(m => Math.min(m.x1, c.x1) - Math.max(m.x0, c.x0) >= 0.5 * Math.min(m.x1 - m.x0, c.x1 - c.x0));
+            if (hit){
+              hit.t += '\n' + c.t; hit.x0 = Math.min(hit.x0, c.x0); hit.x1 = Math.max(hit.x1, c.x1); hit.conf = minConf(hit.conf, c.conf);
+            } else merged.push(c);
+          }
+        }
+        merged.sort((a, b) => a.x0 - b.x0);
+        pageRows.push({ page: pg, cells: merged, cy: g.items.reduce((x, it) => x + it.cy, 0) / g.items.length });
+      }
     }
+    // 偵測「某一欄整個比別欄低一點」：相鄰兩列距離很近、左右位置完全不重疊，而且一再出現
+    if (!loose && isOcr){
+      for (let i = 0; i < pageRows.length - 1; i++){
+        const A = pageRows[i], B = pageRows[i + 1];
+        const clash = A.cells.some(a => B.cells.some(b => Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) > 0));
+        if (!clash && B.cy - A.cy <= H * 1.25 && B.cells.length === 1) pairHits++;
+      }
+    }
+    rowCells.push(...pageRows);
   }
+  tab.pairHits = pairHits;
+  tab.offsetHint = pairHits >= 3 && pairHits >= rowCells.length * 0.3;
 
   // 欄位對齊：把各列格子的起始位置群聚成「欄」
   const tol = Hall * 0.8;
@@ -832,6 +898,7 @@ function rebuildAll(){
   return true;
 }
 $('gapSel').addEventListener('change', e => { const prev = e.target.dataset.prev || '0.9'; if (!rebuildAll()) e.target.value = prev; else e.target.dataset.prev = e.target.value; });
+$('rowSel').addEventListener('change', e => { if (!rebuildAll()) e.target.value = e.target.value === 'loose' ? 'std' : 'loose'; });
 $('normChk').addEventListener('change', e => { if (!rebuildAll()) e.target.checked = !e.target.checked; });
 
 /* ========== 畫面 ========== */
@@ -860,6 +927,11 @@ function renderNotes(){
   if (ocrPages.length){
     const d = document.createElement('div'); d.className = 'notice warn';
     d.innerHTML = `⚠️ 第 ${ocrPages.join('、')} 頁是圖片，已用文字辨識。<b>辨識可能出錯，請對照「原件對照」裡的原圖逐項核對，尤其是數字與金額</b>（例如 1 與 7、0 與 8 容易認錯）。有<u style="text-decoration:underline wavy var(--warn-line)">波浪底線</u>的格子是系統比較沒把握的。`;
+    box.appendChild(d);
+  }
+  if (t.offsetHint && $('rowSel').value !== 'loose'){
+    const d = document.createElement('div'); d.className = 'notice warn';
+    d.innerHTML = '⚠️ 這份看起來有某一欄比別欄低一點，同一列被拆成好幾列。可以試試上方「列對齊」改成<b>寬鬆</b>，不好再改回標準。';
     box.appendChild(d);
   }
   const small = t.pages.filter(p => p.mode === 'ocr' && p.hc && p.hc < 9);
@@ -1088,16 +1160,20 @@ function paintSel(){
 }
 
 /* 選取內容轉成「Tab 分隔」文字：貼進 Excel 會自動分格。不連續的列會依原順序接在一起 */
+function tsvCell(s){
+  s = String(s).replace(/[\t\r]+/g, ' ').trim();
+  return s.includes('\n') ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
 function selTSV(){
   const t = curTab(); const cells = selCellList();
   if (!cells.length) return '';
   const rows = [...new Set(cells.map(x => x[0]))].sort((a, b) => a - b);
   const cols = [...new Set(cells.map(x => x[1]))].sort((a, b) => a - b);
-  return rows.map(r => cols.map(c => isSelected(r, c) ? t.rows[r].cells[c].t.replace(/[\t\r\n]+/g, ' ').trim() : '').join('\t')).join('\n');
+  return rows.map(r => cols.map(c => isSelected(r, c) ? tsvCell(t.rows[r].cells[c].t) : '').join('\t')).join('\n');
 }
 function allTSV(){
   const t = curTab();
-  return t.rows.filter((r, i) => !rowHidden(t, i)).map(r => r.cells.map(c => c.t.replace(/[\t\r\n]+/g, ' ').trim()).join('\t')).join('\n');
+  return t.rows.filter((r, i) => !rowHidden(t, i)).map(r => r.cells.map(c => tsvCell(c.t)).join('\t')).join('\n');
 }
 async function copyText(text, okMsg){
   try{
