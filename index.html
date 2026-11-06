@@ -112,7 +112,7 @@ details summary{cursor:pointer;color:var(--sub);font-size:13px}
 </head>
 <body>
 <header>
-  <h1>PDF／圖片轉 Excel<span class="ver">v1.1.1</span></h1>
+  <h1>PDF／圖片轉 Excel<span class="ver">v1.1.2</span></h1>
   <p class="privacy">🔒 檔案只在您自己的瀏覽器裡處理，不會上傳到任何地方。</p>
 </header>
 <main>
@@ -749,16 +749,47 @@ function rowInfo(r){
     short: cells.every(x => x.length <= 8)
   };
 }
+// 欄位標題常見字眼：強（一看就是品項表的欄位）、弱（表頭資訊裡也常出現，只能輔助）
+const KW_STRONG = ['項次', '序號', '品名', '品項', '項目', '規格', '數量', '單位', '單價', '金額', '小計', '備註', '附註', '材質', '尺寸', '型號', '品牌'];
+const KW_WEAK = ['名稱', '編號', '日期', '說明', '價格', '總價', '數目'];
+function titleScore(r){
+  const cells = r.cells.map(c => c.t.trim()).filter(Boolean);
+  let strong = 0, weak = 0;
+  for (const x of cells){
+    if (x.length > 10 || /[:：]/.test(x)) continue;
+    if (KW_STRONG.some(k => x.includes(k))) strong++;
+    else if (KW_WEAK.some(k => x.includes(k))) weak++;
+  }
+  return { strong, weak, n: cells.length, short: cells.every(x => x.length <= 10) };
+}
 function detectHeader(tab){
-  const rows = tab.rows; if (rows.length < 4) return;
-  const info = rows.map(rowInfo);
-  const item = info.map(x => x.nums >= 2 && x.n >= 3 && !x.colon);
+  const rows = tab.rows; if (rows.length < 3) return;
+  const limit = Math.floor(rows.length * 0.7);
   let i = -1;
-  for (let k = 0; k < rows.length - 1; k++){ if (item[k] && (item[k + 1] || item[k + 2])){ i = k; break; } }
-  if (i <= 0) return;
-  // 緊貼在上面、由短詞組成的「品名 規格 單位…」欄位標題列，算品項表的一部分
-  const t = info[i - 1];
-  if (t.n >= 3 && t.nums === 0 && !t.colon && t.short) i--;
+  // ① 欄位標題列：同一列有好幾個「序號、品項、單價…」這類字眼（讀錯一兩個字、有「□」也沒關係）
+  for (let k = 1; k <= limit && k < rows.length - 1; k++){
+    const t = titleScore(rows[k]);
+    if ((t.strong >= 2 && t.n >= 3) || t.strong + t.weak >= 3){ i = k; break; }
+  }
+  // ② 備用：上方只有 1～2 格的標題，接著是一列由短詞組成的標題列，後面至少 3 列也是多格
+  if (i < 0){
+    const n = rows.map(r => r.cells.filter(c => c.t.trim()).length);
+    for (let k = 1; k <= limit && k < rows.length - 3; k++){
+      if (n[k] < 3 || !titleScore(rows[k]).short) continue;
+      if (!n.slice(0, k).every(x => x <= 2)) continue;
+      if (n.slice(k + 1, k + 5).filter(x => x >= 3).length >= 3){ i = k; break; }
+    }
+  }
+  // ③ 再備用：連續幾列都有兩個以上的數字（舊做法）
+  if (i < 0){
+    const info = rows.map(rowInfo);
+    const item = info.map(x => x.nums >= 2 && x.n >= 3 && !x.colon);
+    for (let k = 0; k < rows.length - 1; k++){ if (item[k] && (item[k + 1] || item[k + 2])){ i = k; break; } }
+    if (i > 0){
+      const t = info[i - 1];
+      if (t.n >= 3 && t.nums === 0 && !t.colon && t.short) i--;
+    }
+  }
   if (i <= 0 || i > rows.length * 0.7) return;
   tab.hdrEnd = i;
 }
