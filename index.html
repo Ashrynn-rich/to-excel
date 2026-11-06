@@ -113,7 +113,7 @@ details summary{cursor:pointer;color:var(--sub);font-size:13px}
 </head>
 <body>
 <header>
-  <h1>PDF／圖片轉 Excel<span class="ver">v1.4.0</span></h1>
+  <h1>PDF／圖片轉 Excel<span class="ver">v1.4.1</span></h1>
   <p class="privacy">🔒 檔案只在您自己的瀏覽器裡處理，不會上傳到任何地方。</p>
 </header>
 <main>
@@ -479,7 +479,7 @@ function eraseLines(g, W, H, Hc){
 }
 // 遞迴切塊（XY-cut）：沿著空白縫隙切開，直到每塊只剩一行字
 function xyCut(g, W, H, Hc, kill){
-  const T = 170, gapY = Math.max(2, Math.round(Hc * 0.16)), gapX = Math.round(Hc * 1.3);
+  const T = 170, gapY = Math.max(2, Math.round(Hc * 0.16)), gapX = Math.round(Hc * 1.7);   // 1.3 會把「高柜 (防水桶身)」這種括號前的小空隙切成兩格；實測欄與欄之間至少 1.9 以上
   const leaves = [];
   function gaps(prof, len, minGap, force){   // 回傳有墨水的區段 [start,end)；force[i] 為真代表那裡原本有直線，一定要切開
     const segs = []; let s = -1, blank = 0;
