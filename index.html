@@ -112,7 +112,7 @@ details summary{cursor:pointer;color:var(--sub);font-size:13px}
 </head>
 <body>
 <header>
-  <h1>PDF／圖片轉 Excel<span class="ver">v1.2.0</span></h1>
+  <h1>PDF／圖片轉 Excel<span class="ver">v1.2.1</span></h1>
   <p class="privacy">🔒 檔案只在您自己的瀏覽器裡處理，不會上傳到任何地方。</p>
 </header>
 <main>
@@ -593,7 +593,7 @@ async function ensurePaddle(){
   if (paddle) return paddle;
   if (paddleFail) return null;
   try{
-    showMask('第一次辨識圖片，正在載入辨識引擎（約 28 MB，只有第一次，之後不用再等）…', 0);
+    showMask('第一次辨識圖片，正在載入辨識引擎（約 20 MB，只有第一次，之後不用再等）…', 0);
     await tick();
     const dir = BASE + 'vendor/paddleocr/';
     if (!window.ort) await loadScript(dir + 'ort.wasm.min.js');
