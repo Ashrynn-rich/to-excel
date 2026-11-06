@@ -68,6 +68,16 @@ tr.pagesep td{background:var(--th);color:var(--sub);text-align:center;font-size:
 .mini{border:none;background:transparent;cursor:pointer;padding:2px 5px;border-radius:5px;color:var(--sub);font-size:.93em;touch-action:manipulation}
 .mini:hover{background:var(--cell-hover);color:var(--text)}
 .mini.del:hover{color:var(--danger)}
+tr.foldrow{display:none}
+tr.hdrrow td.c{background:var(--th);color:var(--sub)}
+tr.hdrlast td{border-bottom:3px solid var(--brand)}
+tr.hdrband td{background:var(--warn-bg);border-color:var(--warn-line);font-size:.93em;cursor:pointer;padding:.45em .7em}
+tr.hdrband td small{color:var(--sub)}
+td.c.mg{vertical-align:middle}
+#ctxMenu{position:fixed;z-index:70;background:var(--card);border:1px solid var(--line);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.25);padding:4px;min-width:240px;max-width:min(92vw,420px)}
+#ctxMenu button{display:block;width:100%;text-align:left;border:none;background:transparent;padding:8px 12px;border-radius:6px;cursor:pointer;font-size:14px}
+#ctxMenu button:hover{background:var(--cell-hover)}
+#ctxMenu .none{padding:8px 12px;color:var(--sub);font-size:13px}
 .side{position:sticky;top:10px}
 .side .pg{display:flex;gap:8px;align-items:center;margin-bottom:8px}
 .imgbox{border:1px solid var(--line);border-radius:8px;overflow:auto;max-height:82vh;background:var(--th)}
@@ -102,7 +112,7 @@ details summary{cursor:pointer;color:var(--sub);font-size:13px}
 </head>
 <body>
 <header>
-  <h1>PDF／圖片轉 Excel<span class="ver">v1.0.0</span></h1>
+  <h1>PDF／圖片轉 Excel<span class="ver">v1.1.0</span></h1>
   <p class="privacy">🔒 檔案只在您自己的瀏覽器裡處理，不會上傳到任何地方。</p>
 </header>
 <main>
@@ -154,7 +164,7 @@ details summary{cursor:pointer;color:var(--sub);font-size:13px}
           <div class="tablewrap"><table id="tbl" tabindex="0"></table></div>
           <div id="selStatus" aria-live="polite">&nbsp;</div>
           <p style="color:var(--sub);font-size:13px;margin:8px 0 0">
-            💡 <b>選取</b>（和 Excel 一樣）：拖曳選範圍；點起點再按住 Shift 點終點可延伸；Ctrl（Mac 按 ⌘）點選可加選；點列號選整列、點 A／B／C 選整欄；Ctrl＋Shift＋↓（Mac 按 ⌘＋Shift＋↓）選到最後一列，→ 是最後一欄；Ctrl＋A 全選；Esc 取消。<b>複製</b>：Ctrl＋C（Mac 按 ⌘C）。<b>改字</b>：雙擊或按 Enter。列左邊「↑」是「併入上一列」，「✕」是刪除。
+            💡 <b>選取</b>（和 Excel 一樣）：拖曳選範圍；點起點再按住 Shift 點終點可延伸；Ctrl（Mac 按 ⌘）點選可加選；點列號選整列、點 A／B／C 選整欄；Ctrl＋Shift＋↓（Mac 按 ⌘＋Shift＋↓）選到最後一列，→ 是最後一欄；Ctrl＋A 全選；Esc 取消。<b>複製</b>：Ctrl＋C（Mac 按 ⌘C）。<b>改字</b>：雙擊或按 Enter。列左邊「↑」是「併入上一列」，「✕」是刪除。<b>表頭資訊</b>：品項表上方的客戶、工程、聯絡方式會自動收起（不會被複製或下載），點黃色那一條可展開；判斷錯了就在任一列按<b>滑鼠右鍵</b>，選「從這一列開始是品項」。左邊「分類」欄有跨好幾列的文字時，會自動合併成一格。
           </p>
         </div>
         <div class="side">
@@ -352,7 +362,7 @@ async function processFile(f){
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     const items = await ocrCanvas(canvas, s, 1, `${f.name}：辨識圖片`);
     tab.items.push(...items);
-    tab.pages.push({ mode: 'ocr', img: await canvasToUrl(canvas, 1000), count: items.length });
+    tab.pages.push({ mode: 'ocr', img: await canvasToUrl(canvas, 1000), count: items.length, hc: ocrInfo ? Math.round(ocrInfo.hc / s) : 0 });
   }
   return tab;
 }
@@ -365,6 +375,138 @@ function loadImage(file){
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('瀏覽器無法開啟這張圖片（HEIC 請改用 Safari，或先轉成 JPG）')); };
     img.src = url;
   });
+}
+
+/* ========== 圖片前處理與版面切塊（沒有格線也能用） ========== */
+function grayOf(canvas){
+  const W = canvas.width, H = canvas.height;
+  const p = canvas.getContext('2d').getImageData(0, 0, W, H).data;
+  const g = new Uint8ClampedArray(W * H);
+  for (let i = 0, j = 0; i < p.length; i += 4, j++) g[j] = p[i] * 0.299 + p[i + 1] * 0.587 + p[i + 2] * 0.114;
+  return g;
+}
+// 估計「一個字大約多高」：找出深色小塊(連通區域)，取高度中位數
+function estimateCharH(g, W, H){
+  const lab = new Int32Array(W * H);
+  const hs = [];
+  const stack = [];
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+    const i = y * W + x;
+    if (lab[i] || g[i] > 140) continue;
+    let minx = x, maxx = x, miny = y, maxy = y, n = 0;
+    lab[i] = 1; stack.push(i);
+    while (stack.length){
+      const k = stack.pop(); n++;
+      const kx = k % W, ky = (k - kx) / W;
+      if (kx < minx) minx = kx; if (kx > maxx) maxx = kx; if (ky < miny) miny = ky; if (ky > maxy) maxy = ky;
+      if (n > 20000) { /* 巨大色塊，不是文字 */ }
+      if (kx > 0 && !lab[k - 1] && g[k - 1] <= 140){ lab[k - 1] = 1; stack.push(k - 1); }
+      if (kx < W - 1 && !lab[k + 1] && g[k + 1] <= 140){ lab[k + 1] = 1; stack.push(k + 1); }
+      if (ky > 0 && !lab[k - W] && g[k - W] <= 140){ lab[k - W] = 1; stack.push(k - W); }
+      if (ky < H - 1 && !lab[k + W] && g[k + W] <= 140){ lab[k + W] = 1; stack.push(k + W); }
+    }
+    const h = maxy - miny + 1, w = maxx - minx + 1;
+    if (h >= 5 && h <= 90 && w >= 3 && w <= 110 && n > 12) hs.push(h);
+  }
+  if (hs.length < 8) return 0;
+  hs.sort((a, b) => a - b);
+  return hs[Math.floor(hs.length * 0.6)];   // 略偏高的中位數，避開標點與小零件
+}
+// 把大片灰色／彩色底色塗白（表頭灰條、淺綠表頭等），只留文字與細線
+function whitenFills(g, W, H, Hc){
+  const B = Math.max(4, Math.round(Hc * 0.22));
+  const bw = Math.ceil(W / B), bh = Math.ceil(H / B);
+  const uni = new Uint8Array(bw * bh), mean = new Float32Array(bw * bh);
+  for (let by = 0; by < bh; by++) for (let bx = 0; bx < bw; bx++){
+    let mn = 255, mx = 0, s = 0, n = 0;
+    for (let y = by * B; y < Math.min(H, by * B + B); y++) for (let x = bx * B; x < Math.min(W, bx * B + B); x++){
+      const v = g[y * W + x]; if (v < mn) mn = v; if (v > mx) mx = v; s += v; n++;
+    }
+    const m = s / n; mean[by * bw + bx] = m;
+    uni[by * bw + bx] = (mx - mn < 26 && m > 60 && m < 248) ? 1 : 0;
+  }
+  const core = new Uint8Array(bw * bh);
+  for (let by = 1; by < bh - 1; by++) for (let bx = 1; bx < bw - 1; bx++){
+    const k = by * bw + bx; if (!uni[k]) continue;
+    let ok = true;
+    for (let dy = -1; dy <= 1 && ok; dy++) for (let dx = -1; dx <= 1; dx++){
+      const q = k + dy * bw + dx; if (!uni[q] || Math.abs(mean[q] - mean[k]) > 14){ ok = false; break; }
+    }
+    if (ok) core[k] = 1;
+  }
+  for (let by = 0; by < bh; by++) for (let bx = 0; bx < bw; bx++){
+    let hit = false;
+    for (let dy = -1; dy <= 1 && !hit; dy++) for (let dx = -1; dx <= 1; dx++){
+      const yy = by + dy, xx = bx + dx;
+      if (yy >= 0 && yy < bh && xx >= 0 && xx < bw && core[yy * bw + xx]){ hit = true; break; }
+    }
+    if (!hit) continue;
+    for (let y = by * B; y < Math.min(H, by * B + B); y++) for (let x = bx * B; x < Math.min(W, bx * B + B); x++) g[y * W + x] = 255;
+  }
+}
+// 擦掉表格的長橫線與長直線（有格線的報價單），避免被當成文字
+function eraseLines(g, W, H, Hc){
+  const T = 150, minH = Math.round(Hc * 4), minV = Math.round(Hc * 2.4);
+  const kill = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++){
+    let x = 0;
+    while (x < W){
+      if (g[y * W + x] < T){ let e = x; while (e < W && g[y * W + e] < T) e++; if (e - x >= minH) for (let k = x; k < e; k++) kill[y * W + k] = 1; x = e; } else x++;
+    }
+  }
+  for (let x = 0; x < W; x++){
+    let y = 0;
+    while (y < H){
+      if (g[y * W + x] < T){ let e = y; while (e < H && g[e * W + x] < T) e++; if (e - y >= minV) for (let k = y; k < e; k++) kill[k * W + x] = 1; y = e; } else y++;
+    }
+  }
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+    if (!kill[y * W + x]) continue;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++){
+      const yy = y + dy, xx = x + dx;
+      if (yy >= 0 && yy < H && xx >= 0 && xx < W) g[yy * W + xx] = 255;
+    }
+  }
+  return kill;
+}
+// 遞迴切塊（XY-cut）：沿著空白縫隙切開，直到每塊只剩一行字
+function xyCut(g, W, H, Hc, kill){
+  const T = 170, gapY = Math.max(2, Math.round(Hc * 0.16)), gapX = Math.round(Hc * 1.3);
+  const leaves = [];
+  function gaps(prof, len, minGap, force){   // 回傳有墨水的區段 [start,end)；force[i] 為真代表那裡原本有直線，一定要切開
+    const segs = []; let s = -1, blank = 0;
+    for (let i = 0; i < len; i++){
+      if (force && force[i]){ if (s >= 0){ segs.push([s, i - blank]); s = -1; } blank = 0; continue; }
+      if (prof[i] > 0){ if (s < 0) s = i; blank = 0; }
+      else if (s >= 0){ blank++; if (blank >= minGap){ segs.push([s, i - blank + 1]); s = -1; blank = 0; } }
+    }
+    if (s >= 0) segs.push([s, len - blank]);
+    return segs;
+  }
+  function rec(x0, y0, x1, y1, depth){
+    const w = x1 - x0, h = y1 - y0; if (w < 3 || h < 3) return;
+    const colp = new Int32Array(w), rowp = new Int32Array(h), kc = new Int32Array(w);
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++){
+      if (g[y * W + x] < T){ colp[x - x0]++; rowp[y - y0]++; }
+      if (kill && kill[y * W + x]) kc[x - x0]++;
+    }
+    // 只有「直線」強制切開欄；橫線不強制（跨列的合併儲存格會被橫線貫穿，硬切會把字切成兩半）
+    let fc = null;
+    if (kill){
+      fc = new Uint8Array(w);
+      for (let i = 0; i < w; i++) if (kc[i] >= h * 0.8) fc[i] = 1;
+    }
+    const rs = gaps(rowp, h, gapY);
+    if (!rs.length) return;
+    if (rs.length > 1 && depth < 40){ for (const [a, b] of rs) rec(x0, y0 + a, x1, y0 + b, depth + 1); return; }
+    const cs = gaps(colp, w, gapX, fc);
+    if (!cs.length) return;
+    if (cs.length > 1 && depth < 40){ for (const [a, b] of cs) rec(x0 + a, y0 + rs[0][0], x0 + b, y0 + rs[0][1], depth + 1); return; }
+    leaves.push({ x0: x0 + cs[0][0], x1: x0 + cs[0][1], y0: y0 + rs[0][0], y1: y0 + rs[0][1] });
+  }
+  rec(0, 0, W, H, 0);
+  // 太小的墨點（污點、單獨的標點）丟掉；但窄的數字（例如序號 1）要留下
+  return leaves.filter(l => (l.y1 - l.y0) >= Hc * 0.45 && (l.x1 - l.x0) >= Hc * 0.12);
 }
 
 /* ========== 文字辨識（OCR） ========== */
@@ -384,9 +526,8 @@ async function ensureOcr(){
   });
   return ocrWorker;
 }
-async function ocrCanvas(canvas, scale, pageNo, label){
-  const w = await ensureOcr();
-  ocrLabel = label; showMask(label, 0);
+async function ocrWholePage(w, canvas, scale, pageNo){
+  await w.setParameters({ tessedit_pageseg_mode: '3' });
   const { data } = await w.recognize(canvas);
   const items = [];
   const lines = data.lines && data.lines.length ? data.lines : [{ bbox: null, words: data.words || [] }];
@@ -405,6 +546,107 @@ async function ocrCanvas(canvas, scale, pageNo, label){
     }
   }
   return items;
+}
+
+/* 先切塊、再一塊一塊辨識：沒有格線、有灰色底條的報價單也不會被整頁版面分析搞亂 */
+const NOISE_EDGE = /^[“”"'‘’`|]+|[“”"'‘’`|]+$/g;
+let ocrInfo = null;     // 最近一次辨識的字高資訊（用來提醒「圖片太小」）
+// 辨識常把中文的「，」「：」讀成半形；夾在中文字之間時改回全形
+function fixCjkPunct(s){
+  return s.replace(/([一-鿿])\s*,\s*(?=\S)/g, '$1，')
+          .replace(/([一-鿿])\s*\.(?=[一-鿿「『《（(])/g, '$1，')
+          .replace(/([一-鿿])\s*\.$/, '$1。')
+          .replace(/([一-鿿])\s*:\s*/g, '$1：');
+}
+async function ocrByBlocks(w, canvas, scale, pageNo, label){
+  const W0 = canvas.width, H0 = canvas.height;
+  const g0 = grayOf(canvas);
+  const Hc0 = estimateCharH(g0, W0, H0);
+  if (!Hc0) return null;
+  let f = Math.max(1, Math.min(4, 34 / Hc0));          // 字太小就先放大，讓一個字約 34px 高
+  if (W0 * f > 5200) f = Math.max(1, 5200 / W0);
+  let c = canvas, g = g0;
+  if (f > 1.05){
+    c = document.createElement('canvas');
+    c.width = Math.round(W0 * f); c.height = Math.round(H0 * f);
+    const cx = c.getContext('2d'); cx.imageSmoothingQuality = 'high'; cx.drawImage(canvas, 0, 0, c.width, c.height);
+    g = grayOf(c);
+  }
+  const W = c.width, H = c.height, k = W / W0, Hc = Hc0 * k;
+  ocrInfo = { hc: Hc0 };
+  whitenFills(g, W, H, Hc);
+  const kill = eraseLines(g, W, H, Hc);
+  const leaves = xyCut(g, W, H, Hc, kill);
+  if (!leaves.length || leaves.length > 700) return null;
+  const sf = scale * k, pad = Math.round(Hc * 0.4);
+  const items = [];
+  for (let n = 0; n < leaves.length; n++){
+    const l = leaves[n];
+    showMask(label, n / leaves.length);
+    if (n % 3 === 0) await tick();
+    const cw = l.x1 - l.x0 + pad * 2, ch = l.y1 - l.y0 + pad * 2;
+    const lc = document.createElement('canvas'); lc.width = cw; lc.height = ch;
+    const lx = lc.getContext('2d'); const id = lx.createImageData(cw, ch);
+    id.data.fill(255);
+    for (let y = l.y0; y < l.y1; y++) for (let x = l.x0; x < l.x1; x++){
+      const v = g[y * W + x], o = ((y - l.y0 + pad) * cw + (x - l.x0 + pad)) * 4;
+      id.data[o] = id.data[o + 1] = id.data[o + 2] = v;
+    }
+    lx.putImageData(id, 0, 0);
+    // 讀到空白就換辦法再試：短字（如「單價」「運費」）有時縮小一點反而讀得出來
+    const oneLine = (l.y1 - l.y0) < Hc * 1.8;
+    const tries = oneLine ? [[1, '7'], [0.6, '7'], [1.4, '7'], [1, '8'], [0.6, '6']] : [[1, '6'], [0.6, '6'], [1, '7']];
+    let data = null;
+    for (const [sc, md] of tries){
+      let src = lc;
+      if (sc !== 1){
+        src = document.createElement('canvas');
+        src.width = Math.round(cw * sc); src.height = Math.round(ch * sc);
+        const sx = src.getContext('2d'); sx.fillStyle = '#fff'; sx.fillRect(0, 0, src.width, src.height);
+        sx.imageSmoothingQuality = 'high'; sx.drawImage(lc, 0, 0, src.width, src.height);
+      }
+      await w.setParameters({ tessedit_pageseg_mode: md });
+      const r = await w.recognize(src);
+      if (r.data.text && r.data.text.replace(/\s/g, '')){
+        data = r.data;
+        if (sc !== 1 && data.lines) for (const ln of data.lines){ if (ln.bbox) ln.bbox = { x0: ln.bbox.x0 / sc, x1: ln.bbox.x1 / sc, y0: ln.bbox.y0 / sc, y1: ln.bbox.y1 / sc }; }
+        break;
+      }
+    }
+    if (!data){   // 這裡明明有字卻讀不出來：留一個「□」記號，免得複製出去時默默少一格
+      items.push({ page: pageNo, str: '□', x0: l.x0 / sf, x1: l.x1 / sf, cy: (l.y0 + l.y1) / 2 / sf, h: Hc / sf, conf: 0 });
+      continue;
+    }
+    // 每一行字當成一個儲存格：位置用切塊本身的範圍（辨識引擎給的單字位置常常不準）
+    let lines = (data.lines || []).filter(ln => (ln.words || []).length);
+    if (!lines.length) lines = [{ words: [{ text: data.text || '' }], confidence: data.confidence, bbox: null }];
+    for (const ln of lines){
+      let txt = '';
+      for (const wd of ln.words){
+        const t = (wd.text || '').trim().replace(NOISE_EDGE, '').trim();
+        if (!t) continue;
+        txt = !txt ? t : ((isCJK(txt.slice(-1)) || isCJK(t.charAt(0))) ? txt + t : txt + ' ' + t);
+      }
+      txt = fixCjkPunct(txt.trim());
+      if (!txt) txt = '□';
+      let x0 = l.x0, x1 = l.x1, cy = (l.y0 + l.y1) / 2, lh = Math.min(Hc, l.y1 - l.y0);
+      if (lines.length > 1 && ln.bbox){
+        x0 = ln.bbox.x0 - pad + l.x0; x1 = ln.bbox.x1 - pad + l.x0;
+        cy = (ln.bbox.y0 + ln.bbox.y1) / 2 - pad + l.y0; lh = Math.min(Hc * 1.3, ln.bbox.y1 - ln.bbox.y0);
+      }
+      items.push({ page: pageNo, str: txt, x0: x0 / sf, x1: x1 / sf, cy: cy / sf, h: Math.max(lh, Hc * 0.8) / sf, conf: ln.confidence });
+    }
+  }
+  return items;
+}
+async function ocrCanvas(canvas, scale, pageNo, label){
+  const w = await ensureOcr();
+  ocrLabel = label; showMask(label, 0);
+  await tick();
+  let items = null; ocrInfo = null;
+  try { items = await ocrByBlocks(w, canvas, scale, pageNo, label); } catch (err){ console.warn('切塊辨識失敗，改用整頁辨識', err); }
+  if (items && items.length) return items;
+  return ocrWholePage(w, canvas, scale, pageNo);
 }
 
 /* ========== 排成表格 ========== */
@@ -485,7 +727,66 @@ function buildRows(tab){
   for (let k = 0; k < ncols; k++) if (out.some(r => r.cells[k].t.trim() !== '')) keep.push(k);
   for (const r of out) r.cells = keep.map(k => r.cells[k]);
   tab.rows = out; tab.ncols = keep.length; tab.history = []; tab.dirty = false;
+  tab.hdrEnd = 0; tab.hdrOpen = false; tab.merges = [];
+  detectHeader(tab);
+  detectMerges(tab);
 }
+
+/* ----- 表頭資訊：品項表上方的客戶／工程／聯絡方式等，通常不用輸入 ----- */
+const NUM_RE = /^[\s$¥￥]*(NT\$?)?[+-]?\d[\d,]*(\.\d+)?\s*%?$/i;
+const isNumText = s => NUM_RE.test(String(s).trim());
+function rowInfo(r){
+  const cells = r.cells.map(c => c.t.trim()).filter(Boolean);
+  return {
+    n: cells.length,
+    nums: cells.filter(isNumText).length,
+    colon: cells.some(x => /[:：]$/.test(x) || /[:：]\s*\S/.test(x) && x.length < 40),
+    short: cells.every(x => x.length <= 8)
+  };
+}
+function detectHeader(tab){
+  const rows = tab.rows; if (rows.length < 4) return;
+  const info = rows.map(rowInfo);
+  const item = info.map(x => x.nums >= 2 && x.n >= 3 && !x.colon);
+  let i = -1;
+  for (let k = 0; k < rows.length - 1; k++){ if (item[k] && (item[k + 1] || item[k + 2])){ i = k; break; } }
+  if (i <= 0) return;
+  // 緊貼在上面、由短詞組成的「品名 規格 單位…」欄位標題列，算品項表的一部分
+  const t = info[i - 1];
+  if (t.n >= 3 && t.nums === 0 && !t.colon && t.short) i--;
+  if (i <= 0 || i > rows.length * 0.7) return;
+  tab.hdrEnd = i;
+}
+
+/* ----- 合併儲存格：最左邊的「分類」欄，標籤在上下幾列的中間，其餘是空白 ----- */
+function detectMerges(tab){
+  const rows = tab.rows, n = rows.length, start0 = tab.hdrEnd || 0;
+  const pages = [...new Set(rows.map(r => r.page))];
+  for (let c = 0; c < Math.min(2, tab.ncols - 1); c++){
+    for (const pg of pages){
+      const idx = [];
+      for (let i = start0; i < n; i++) if (rows[i].page === pg) idx.push(i);
+      if (idx.length < 4) continue;
+      const labels = idx.filter(i => rows[i].cells[c].t.trim());
+      if (labels.length < 2 || labels.length > idx.length * 0.45) continue;
+      if (labels.some(i => { const x = rows[i].cells[c].t.trim(); return x.length > 14 || isNumText(x); })) continue;
+      const last = idx[idx.length - 1];
+      let start = idx[0];
+      for (let k = 0; k < labels.length; k++){
+        const L = labels[k], next = k + 1 < labels.length ? labels[k + 1] : last + 1;
+        let end = (L <= start) ? next - 1 : Math.min(2 * L - start, next - 1);   // 標籤在群組正中間：往下延伸一樣的長度
+        if (end < L) end = next - 1;
+        if (end > start){
+          if (L !== start){ rows[start].cells[c] = rows[L].cells[c]; rows[L].cells[c] = { t: '', conf: null }; }
+          tab.merges.push({ c, r0: start, r1: end });
+        }
+        start = end + 1;
+      }
+    }
+  }
+}
+const rowHidden = (t, i) => !!t && (t.hdrEnd || 0) > 0 && !t.hdrOpen && i < t.hdrEnd;
+const findMerge = (t, r, c) => (t.merges || []).find(m => m.c === c && r >= m.r0 && r <= m.r1);
 
 function rebuildAll(){
   if (state.tabs.some(t => t.dirty) &&
@@ -525,6 +826,12 @@ function renderNotes(){
     d.innerHTML = `⚠️ 第 ${ocrPages.join('、')} 頁是圖片，已用文字辨識。<b>辨識可能出錯，請對照「原件對照」裡的原圖逐項核對，尤其是數字與金額</b>（例如 1 與 7、0 與 8 容易認錯）。有<u style="text-decoration:underline wavy var(--warn-line)">波浪底線</u>的格子是系統比較沒把握的。`;
     box.appendChild(d);
   }
+  const small = t.pages.filter(p => p.mode === 'ocr' && p.hc && p.hc < 9);
+  if (small.length){
+    const d = document.createElement('div'); d.className = 'notice warn';
+    d.textContent = `⚠️ 這張圖片的字很小（約 ${small[0].hc} 像素高），系統已自動放大再辨識，但仍容易認錯，請特別仔細核對。`;
+    box.appendChild(d);
+  }
   if (!t.rows.length){
     const d = document.createElement('div'); d.className = 'notice warn';
     d.textContent = '⚠️ 沒有讀到任何文字。可能是圖片太模糊、太小，或內容不是文字。請換一張更清楚的圖試試。';
@@ -535,21 +842,35 @@ function renderNotes(){
 function renderTable(){
   const t = curTab(); const tbl = $('tbl');
   if (!t){ tbl.innerHTML = ''; return; }
+  const hdrEnd = t.hdrEnd || 0, fold = hdrEnd > 0 && !t.hdrOpen;
+  const mTop = {}, mSkip = {};
+  (t.merges || []).forEach(m => {
+    if ((m.r0 < hdrEnd && m.r1 >= hdrEnd) || m.r1 >= t.rows.length || m.c >= t.ncols) return;
+    mTop[m.r0 + ':' + m.c] = m.r1 - m.r0 + 1;
+    for (let r = m.r0 + 1; r <= m.r1; r++) mSkip[r + ':' + m.c] = 1;
+  });
   let h = '<thead><tr><th></th>';
   for (let c = 0; c < t.ncols; c++){
     h += `<th data-hc="${c}" title="點一下選取整欄"><span class="cn">${colName(c)}</span> <button class="mini del" data-act="delcol" data-c="${c}" title="刪除這一欄" aria-label="刪除欄 ${colName(c)}">✕</button></th>`;
   }
   h += '</tr></thead><tbody>';
+  if (hdrEnd > 0){
+    h += `<tr class="hdrband" data-act="togglehdr"><td colspan="${t.ncols + 1}">${fold ? '▶' : '▼'} 表頭資訊（上方 ${hdrEnd} 列，例如客戶、工程、聯絡方式，通常不用輸入）${fold ? '已收起，複製與下載不含這些列' : '已展開，下方藍色粗線以上是表頭資訊'} — <u>點此${fold ? '展開' : '收起'}</u>　<small>想改邊界：在任一列按滑鼠右鍵</small></td></tr>`;
+  }
   let lastPg = null;
   t.rows.forEach((r, ri) => {
+    const inHdr = ri < hdrEnd;
     if (t.pages.length > 1 && r.page !== lastPg){
-      h += `<tr class="pagesep"><td colspan="${t.ncols + 1}">— 第 ${r.page} 頁 —</td></tr>`;
+      if (!(fold && inHdr)) h += `<tr class="pagesep"><td colspan="${t.ncols + 1}">— 第 ${r.page} 頁 —</td></tr>`;
       lastPg = r.page;
     }
-    h += `<tr data-r="${ri}"><td class="rn" title="點一下選取整列"><button class="mini" data-act="merge" data-r="${ri}" title="併入上一列" aria-label="併入上一列" ${ri === 0 ? 'disabled style="visibility:hidden"' : ''}>↑</button><span class="rnum">${ri + 1}</span><button class="mini del" data-act="delrow" data-r="${ri}" title="刪除這一列" aria-label="刪除這一列">✕</button></td>`;
+    const cls = (inHdr ? 'hdrrow' + (fold ? ' foldrow' : '') : '') + (ri === hdrEnd - 1 ? ' hdrlast' : '');
+    h += `<tr data-r="${ri}"${cls ? ` class="${cls.trim()}"` : ''}><td class="rn" title="點一下選取整列"><button class="mini" data-act="merge" data-r="${ri}" title="併入上一列" aria-label="併入上一列" ${ri === 0 ? 'disabled style="visibility:hidden"' : ''}>↑</button><span class="rnum">${ri + 1}</span><button class="mini del" data-act="delrow" data-r="${ri}" title="刪除這一列" aria-label="刪除這一列">✕</button></td>`;
     r.cells.forEach((c, ci) => {
+      if (mSkip[ri + ':' + ci]) return;
       const low = c.conf != null && c.conf < LOW_CONF && c.t.trim() ? ' low' : '';
-      h += `<td class="c${low}" spellcheck="false" data-r="${ri}" data-c="${ci}">${escapeHtml(c.t)}</td>`;
+      const span = mTop[ri + ':' + ci];
+      h += `<td class="c${low}${span ? ' mg' : ''}"${span ? ` rowspan="${span}"` : ''} spellcheck="false" data-r="${ri}" data-c="${ci}">${escapeHtml(c.t)}</td>`;
     });
     h += '</tr>';
   });
@@ -659,7 +980,7 @@ let drag = null;          // 拖曳中：{ mode:'cell'|'row'|'col', anchor, base
 let editing = null;       // 正在編輯的格子
 let lastMouse = null;
 
-function snapshot(t){ return JSON.stringify({ rows: t.rows, ncols: t.ncols }); }
+function snapshot(t){ return JSON.stringify({ rows: t.rows, ncols: t.ncols, hdrEnd: t.hdrEnd || 0, merges: t.merges || [] }); }
 function pushHistory(){
   const t = curTab(); t.history.push(snapshot(t));
   if (t.history.length > HISTORY_MAX) t.history.shift();
@@ -670,7 +991,7 @@ $('undoBtn').onclick = () => {
   const t = curTab(); if (!t || !t.history.length) return;
   stopEdit();
   const s = JSON.parse(t.history.pop());
-  t.rows = s.rows; t.ncols = s.ncols; clearSel(); renderTable(); updateUndo();
+  t.rows = s.rows; t.ncols = s.ncols; t.hdrEnd = s.hdrEnd || 0; t.merges = s.merges || []; clearSel(); renderTable(); updateUndo();
 };
 
 /* ----- 選取範圍 ----- */
@@ -685,7 +1006,7 @@ function isSelected(r, c){ return sel.ranges.some(g => r >= g.r0 && r <= g.r1 &&
 function selCellList(){
   const t = curTab(); const out = [];
   if (!t) return out;
-  for (let r = 0; r < t.rows.length; r++) for (let c = 0; c < t.ncols; c++) if (isSelected(r, c)) out.push([r, c]);
+  for (let r = 0; r < t.rows.length; r++){ if (rowHidden(t, r)) continue; for (let c = 0; c < t.ncols; c++) if (isSelected(r, c)) out.push([r, c]); }
   return out;
 }
 function setSel(ranges, anchor, focus){
@@ -712,14 +1033,15 @@ function rangeText(g){
 }
 function paintSel(){
   const t = curTab(); const tbl = $('tbl');
-  const rowHit = new Set(), colHit = new Set();
-  let n = 0;
+  const list = selCellList();
+  const rowHit = new Set(list.map(x => x[0])), colHit = new Set(list.map(x => x[1]));
+  const n = list.length;
   tbl.querySelectorAll('td.c').forEach(td => {
-    const r = +td.dataset.r, c = +td.dataset.c;
-    const on = isSelected(r, c);
+    const r = +td.dataset.r, c = +td.dataset.c, span = td.rowSpan || 1;
+    let on = false;
+    for (let k = 0; k < span && !on; k++) if (!rowHidden(t, r + k) && isSelected(r + k, c)) on = true;
     td.classList.toggle('sel', on);
-    td.classList.toggle('anchor', !!sel.anchor && sel.anchor.r === r && sel.anchor.c === c);
-    if (on){ rowHit.add(r); colHit.add(c); n++; }
+    td.classList.toggle('anchor', !!sel.anchor && sel.anchor.c === c && sel.anchor.r >= r && sel.anchor.r < r + span);
   });
   tbl.querySelectorAll('td.rn').forEach(td => td.classList.toggle('hl', rowHit.has(+td.parentNode.dataset.r)));
   tbl.querySelectorAll('th[data-hc]').forEach(th => th.classList.toggle('hl', colHit.has(+th.dataset.hc)));
@@ -739,7 +1061,7 @@ function selTSV(){
 }
 function allTSV(){
   const t = curTab();
-  return t.rows.map(r => r.cells.map(c => c.t.replace(/[\t\r\n]+/g, ' ').trim()).join('\t')).join('\n');
+  return t.rows.filter((r, i) => !rowHidden(t, i)).map(r => r.cells.map(c => c.t.replace(/[\t\r\n]+/g, ' ').trim()).join('\t')).join('\n');
 }
 async function copyText(text, okMsg){
   try{
@@ -873,6 +1195,7 @@ $('tbl').addEventListener('keydown', e => {
       if (d[1]) c = d[1] > 0 ? t.ncols - 1 : 0;
     }
     r = Math.max(0, Math.min(t.rows.length - 1, r)); c = Math.max(0, Math.min(t.ncols - 1, c));
+    { let x = r; const dir = (mod && d[0] < 0) ? 1 : (d[0] || 1); while (x >= 0 && x < t.rows.length && rowHidden(t, x)) x += dir; r = (x >= 0 && x < t.rows.length) ? x : sel.focus.r; }
     if (e.shiftKey) setSel([mkRange(sel.anchor, { r, c }, 'cell')], sel.anchor, { r, c });
     else selectCell(r, c);
     const td = $('tbl').querySelector(`td.c[data-r="${r}"][data-c="${c}"]`);
@@ -881,12 +1204,24 @@ $('tbl').addEventListener('keydown', e => {
 });
 
 /* ----- 列／欄按鈕 ----- */
+// 刪掉或併走第 ri 列時：表頭邊界往上移、含這一列的合併儲存格取消、其餘的跟著位移
+function dropRow(t, ri){
+  if (ri < (t.hdrEnd || 0)) t.hdrEnd--;
+  t.merges = (t.merges || []).filter(m => !(ri >= m.r0 && ri <= m.r1))
+    .map(m => ri < m.r0 ? { c: m.c, r0: m.r0 - 1, r1: m.r1 - 1 } : m);
+}
+// 表頭資訊列的展開／收起
+$('tbl').addEventListener('click', e => {
+  if (e.target.closest('button')) return;
+  const band = e.target.closest('tr.hdrband'); if (!band) return;
+  const t = curTab(); stopEdit(); t.hdrOpen = !t.hdrOpen; clearSel(); renderTable();
+});
 $('tbl').addEventListener('click', e => {
   const b = e.target.closest('button[data-act]'); if (!b) return;
   const t = curTab(); const act = b.dataset.act;
   stopEdit();
   if (act === 'delrow'){
-    pushHistory(); t.rows.splice(+b.dataset.r, 1);
+    pushHistory(); dropRow(t, +b.dataset.r); t.rows.splice(+b.dataset.r, 1);
   } else if (act === 'merge'){
     const r = +b.dataset.r; if (r < 1) return;
     pushHistory();
@@ -897,14 +1232,52 @@ $('tbl').addEventListener('click', e => {
       if (!a.t){ up.cells[c] = d; continue; }
       a.t = joinStr(a.t, d.t, 99, 10); a.conf = minConf(a.conf, d.conf);
     }
-    t.rows.splice(r, 1);
+    dropRow(t, r); t.rows.splice(r, 1);
   } else if (act === 'delcol'){
     pushHistory();
     const c = +b.dataset.c;
     t.rows.forEach(r => r.cells.splice(c, 1)); t.ncols--;
+    t.merges = (t.merges || []).filter(m => m.c !== c).map(m => m.c > c ? { c: m.c - 1, r0: m.r0, r1: m.r1 } : m);
   }
   clearSel(); renderTable();
 });
+
+/* ----- 右鍵選單：指定「從這一列開始是品項」、取消合併 ----- */
+const ctxMenu = document.createElement('div');
+ctxMenu.id = 'ctxMenu'; ctxMenu.hidden = true; document.body.appendChild(ctxMenu);
+function closeCtx(){ ctxMenu.hidden = true; ctxMenu.innerHTML = ''; }
+function setHdrEnd(n){
+  const t = curTab(); if (!t) return;
+  pushHistory();
+  if (!(t.hdrEnd > 0) && n > 0) t.hdrOpen = false;
+  t.hdrEnd = n; clearSel(); renderTable();
+}
+$('tbl').addEventListener('contextmenu', e => {
+  const t = curTab(); const tr = e.target.closest('tr[data-r]');
+  if (!t || !tr) return;
+  e.preventDefault(); stopEdit();
+  const r = +tr.dataset.r, td = e.target.closest('td.c');
+  const items = [];
+  if (r > 0) items.push([`從第 ${r + 1} 列開始是品項（上面 ${r} 列當表頭資訊）`, () => setHdrEnd(r)]);
+  if ((t.hdrEnd || 0) > 0) items.push(['不要表頭區：全部都是品項', () => setHdrEnd(0)]);
+  const m = td ? findMerge(t, +td.dataset.r, +td.dataset.c) : null;
+  if (m) items.push(['取消這個合併儲存格', () => { pushHistory(); t.merges = t.merges.filter(x => x !== m); renderTable(); }]);
+  ctxMenu.innerHTML = '';
+  if (!items.length){ const d = document.createElement('div'); d.className = 'none'; d.textContent = '這一列沒有可調整的項目'; ctxMenu.appendChild(d); }
+  items.forEach(([label, fn]) => {
+    const b = document.createElement('button'); b.textContent = label;
+    b.onclick = () => { closeCtx(); fn(); };
+    ctxMenu.appendChild(b);
+  });
+  ctxMenu.hidden = false;
+  const w = ctxMenu.offsetWidth, h = ctxMenu.offsetHeight;
+  ctxMenu.style.left = Math.max(4, Math.min(e.clientX, innerWidth - w - 4)) + 'px';
+  ctxMenu.style.top = Math.max(4, Math.min(e.clientY, innerHeight - h - 4)) + 'px';
+});
+document.addEventListener('mousedown', e => { if (!ctxMenu.hidden && !ctxMenu.contains(e.target)) closeCtx(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeCtx(); });
+window.addEventListener('scroll', closeCtx, true);
+window.addEventListener('resize', closeCtx);
 
 /* ========== 輸出 ========== */
 function cellValue(t){
@@ -917,7 +1290,7 @@ function cellValue(t){
   }
   return s;
 }
-function tabAOA(t){ return t.rows.map(r => r.cells.map(c => cellValue(c.t))); }
+function tabAOA(t){ return t.rows.filter((r, i) => !rowHidden(t, i)).map(r => r.cells.map(c => cellValue(c.t))); }
 function strLen(v){ let n = 0; for (const ch of String(v)) n += isCJK(ch) ? 2 : 1; return n; }
 function sheetName(name, used){
   let n = name.replace(/\.[^.]+$/, '').replace(/[\[\]:*?\/\\]/g, ' ').trim().slice(0, 28) || 'Sheet';
@@ -938,6 +1311,9 @@ $('dlBtn').onclick = () => {
       cols.push({ wch: Math.min(60, m) });
     }
     ws['!cols'] = cols;
+    const off = (t.hdrEnd || 0) > 0 && !t.hdrOpen ? t.hdrEnd : 0;
+    const mg = (t.merges || []).filter(m => m.r0 >= off).map(m => ({ s: { r: m.r0 - off, c: m.c }, e: { r: m.r1 - off, c: m.c } }));
+    if (mg.length) ws['!merges'] = mg;
     XLSX.utils.book_append_sheet(wb, ws, sheetName(t.name, used));
   });
   const fname = state.tabs.length === 1 ? state.tabs[0].name.replace(/\.[^.]+$/, '') + '.xlsx' : '轉換結果.xlsx';
