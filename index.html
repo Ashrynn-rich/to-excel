@@ -71,6 +71,7 @@ tr.pagesep td{background:var(--th);color:var(--sub);text-align:center;font-size:
 tr.foldrow{display:none}
 tr.hdrrow td.c{background:var(--th);color:var(--sub)}
 tr.hdrlast td{border-bottom:3px solid var(--brand)}
+tr.ftrfirst td{border-top:3px solid var(--brand)}
 tr.hdrband td{background:var(--warn-bg);border-color:var(--warn-line);font-size:.93em;cursor:pointer;padding:.45em .7em}
 tr.hdrband td small{color:var(--sub)}
 td.c.mg{vertical-align:middle}
@@ -112,7 +113,7 @@ details summary{cursor:pointer;color:var(--sub);font-size:13px}
 </head>
 <body>
 <header>
-  <h1>PDF／圖片轉 Excel<span class="ver">v1.2.1</span></h1>
+  <h1>PDF／圖片轉 Excel<span class="ver">v1.3.0</span></h1>
   <p class="privacy">🔒 檔案只在您自己的瀏覽器裡處理，不會上傳到任何地方。</p>
 </header>
 <main>
@@ -901,8 +902,11 @@ function buildRows(tab){
   for (const r of out) r.cells = keep.map(k => r.cells[k]);
   tab.rows = out; tab.ncols = keep.length; tab.history = []; tab.dirty = false;
   tab.hdrEnd = 0; tab.hdrOpen = false; tab.merges = [];
+  tab.ftrStart = tab.rows.length; tab.ftrOpen = false;
   detectHeader(tab);
+  detectFooter(tab);
   detectMerges(tab);
+  flagUnits(tab);
 }
 
 /* ----- 表頭資訊：品項表上方的客戶／工程／聯絡方式等，通常不用輸入 ----- */
@@ -962,9 +966,55 @@ function detectHeader(tab){
   tab.hdrEnd = i;
 }
 
+/* ----- 表尾資訊：合計之後的備註、經辦人、E-mail、電話、傳真、地址、客戶簽章確認 ----- */
+const TOTAL_KW = /合計|總計|总计|總額|[營警]業[稅税]|[稅税]額|含[稅税]|未[稅税]|小計/;
+const FOOT_KW = /備註|備考|經辦|承辦|E-?mail|電話|电话|傳真|传真|地址|簽章|客戶簽|簽名|蓋章|製表|審核|統一編號|匯款|銀行|帳號|戶名/i;
+function detectFooter(tab){
+  const rows = tab.rows, n = rows.length, h = tab.hdrEnd || 0;
+  if (n < 6) return;
+  const txt = rows.map(r => r.cells.map(c => c.t).join(' '));
+  let T = -1, start = -1;
+  for (let i = n - 1; i > h; i--){ if (TOTAL_KW.test(txt[i]) && /\d/.test(txt[i])){ T = i; break; } }
+  if (T >= 0){
+    for (let i = T + 1; i < n; i++){ if (txt[i].trim()){ start = i; break; } }
+    if (start >= 0 && !txt.slice(start).some(x => FOOT_KW.test(x))) start = -1;
+  } else {
+    const info = rows.map(rowInfo);
+    for (let i = h + 2; i < n; i++){
+      if (FOOT_KW.test(txt[i]) && !info.slice(i).some(x => x.nums >= 2 && x.n >= 3)){ start = i; break; }
+    }
+  }
+  if (start > h + 1 && start < n && (n - start) <= n * 0.5) tab.ftrStart = start;
+}
+
+/* ----- 單位欄：最容易讀錯（㎡ 讀成「山」「m」、坪、式…）。看起來不像單位的格子標波浪底線 ----- */
+const UNITS = new Set(['㎡', 'm²', 'm2', '平方', '平方米', '平方公尺', '坪', '式', '片', '個', '个', '組', '组', '支', '才', '尺', '公尺', '米', 'cm', '公分', '台', '套', '條', '条', '箱', '包', '張', '张', '只', '件', '付', '對', '对', '公斤', 'kg', '噸', '袋', '桶', '罐', '卷', '捲', '盒', '本', '項', '项', '人', '日', '天', '工', '月', '年', '次', '趟', '座', '樘', '扇', '道', '間', '间', '批', 'set', 'pcs', 'ea', '才數', '雙', '双', '塊', '块', '根', '顆', '颗', '碼', '延米', '呎', '英呎', 'm3', 'm³', '立方', '立方米', 'l', '公升', '加侖']);
+function findUnitCol(tab){
+  const lim = Math.min(tab.rows.length, 80);
+  for (let i = 0; i < lim; i++){
+    const cells = tab.rows[i].cells;
+    for (let c = 0; c < cells.length; c++){ if (/^[單单]位$/.test(cells[c].t.trim())) return { r: i, c }; }
+  }
+  return null;
+}
+function flagUnits(tab){
+  tab.unitCol = null;
+  if (!tab.pages.some(p => p.mode === 'ocr')) return;
+  const u = findUnitCol(tab); if (!u) return;
+  tab.unitCol = u.c;
+  for (let i = u.r + 1; i < tab.rows.length; i++){
+    const cell = tab.rows[i].cells[u.c]; if (!cell) continue;
+    const t = cell.t.trim(); if (!t) continue;
+    if (TOTAL_KW.test(tab.rows[i].cells.map(c => c.t).join(' '))) continue;   // 合計、營業稅那幾列的標籤剛好落在這一欄，不是單位
+    if (tab.ftrStart != null && i >= tab.ftrStart) break;
+    if (/[:：]$/.test(t)) continue;                                       // 以冒號結尾的是標籤，不是單位
+    if (!UNITS.has(t.toLowerCase())) cell.conf = 0;
+  }
+}
+
 /* ----- 合併儲存格：最左邊的「分類」欄，標籤在上下幾列的中間，其餘是空白 ----- */
 function detectMerges(tab){
-  const rows = tab.rows, n = rows.length, start0 = tab.hdrEnd || 0;
+  const rows = tab.rows, n = Math.min(rows.length, tab.ftrStart == null ? rows.length : tab.ftrStart), start0 = tab.hdrEnd || 0;
   const pages = [...new Set(rows.map(r => r.page))];
   for (let c = 0; c < Math.min(2, tab.ncols - 1); c++){
     for (const pg of pages){
@@ -989,7 +1039,7 @@ function detectMerges(tab){
     }
   }
 }
-const rowHidden = (t, i) => !!t && (t.hdrEnd || 0) > 0 && !t.hdrOpen && i < t.hdrEnd;
+const rowHidden = (t, i) => !!t && (((t.hdrEnd || 0) > 0 && !t.hdrOpen && i < t.hdrEnd) || ((t.ftrStart != null && t.ftrStart < t.rows.length) && !t.ftrOpen && i >= t.ftrStart));
 const findMerge = (t, r, c) => (t.merges || []).find(m => m.c === c && r >= m.r0 && r <= m.r1);
 
 function rebuildAll(){
@@ -1037,6 +1087,13 @@ function renderNotes(){
     d.innerHTML = '⚠️ 這份看起來有某一欄比別欄低一點，同一列被拆成好幾列。可以試試上方「列對齊」改成<b>寬鬆</b>，不好再改回標準。';
     box.appendChild(d);
   }
+  if (t.unitCol != null){
+    let bad = 0;
+    for (const r of t.rows){ const c = r.cells[t.unitCol]; if (c && c.t.trim() && c.conf != null && c.conf < LOW_CONF) bad++; }
+    const d = document.createElement('div'); d.className = 'notice warn';
+    d.innerHTML = '⚠️ <b>「單位」欄最容易讀錯</b>（㎡ 常讀成「山」「m」「□」，坪、式也會錯），請逐格對照原圖。' + (bad ? `目前有 <b>${bad}</b> 格看起來不像單位，已標波浪底線。` : '');
+    box.appendChild(d);
+  }
   const small = t.pages.filter(p => p.mode === 'ocr' && p.hc && p.hc < 9);
   if (small.length){
     const d = document.createElement('div'); d.className = 'notice warn';
@@ -1054,6 +1111,7 @@ function renderTable(){
   const t = curTab(); const tbl = $('tbl');
   if (!t){ tbl.innerHTML = ''; return; }
   const hdrEnd = t.hdrEnd || 0, fold = hdrEnd > 0 && !t.hdrOpen;
+  const ftr = (t.ftrStart != null && t.ftrStart < t.rows.length) ? t.ftrStart : -1, ftrFold = ftr >= 0 && !t.ftrOpen;
   const mTop = {}, mSkip = {};
   (t.merges || []).forEach(m => {
     if ((m.r0 < hdrEnd && m.r1 >= hdrEnd) || m.r1 >= t.rows.length || m.c >= t.ncols) return;
@@ -1066,16 +1124,19 @@ function renderTable(){
   }
   h += '</tr></thead><tbody>';
   if (hdrEnd > 0){
-    h += `<tr class="hdrband" data-act="togglehdr"><td colspan="${t.ncols + 1}">${fold ? '▶' : '▼'} 表頭資訊（上方 ${hdrEnd} 列，例如客戶、工程、聯絡方式，通常不用輸入）${fold ? '已收起，複製與下載不含這些列' : '已展開，下方藍色粗線以上是表頭資訊'} — <u>點此${fold ? '展開' : '收起'}</u>　<small>想改邊界：在任一列按滑鼠右鍵</small></td></tr>`;
+    h += `<tr class="hdrband" data-part="hdr"><td colspan="${t.ncols + 1}">${fold ? '▶' : '▼'} 表頭資訊（上方 ${hdrEnd} 列，例如客戶、工程、聯絡方式，通常不用輸入）${fold ? '已收起，複製與下載不含這些列' : '已展開，下方藍色粗線以上是表頭資訊'} — <u>點此${fold ? '展開' : '收起'}</u>　<small>想改邊界：在任一列按滑鼠右鍵</small></td></tr>`;
   }
   let lastPg = null;
   t.rows.forEach((r, ri) => {
-    const inHdr = ri < hdrEnd;
+    const inHdr = ri < hdrEnd, inFtr = ftr >= 0 && ri >= ftr;
+    if (ri === ftr){
+      h += `<tr class="hdrband ftrband" data-part="ftr"><td colspan="${t.ncols + 1}">${ftrFold ? '▶' : '▼'} 表尾資訊（下方 ${t.rows.length - ftr} 列，例如備註、經辦人、電話、傳真、地址、客戶簽章確認）${ftrFold ? '已收起，複製與下載不含這些列' : '已展開'} — <u>點此${ftrFold ? '展開' : '收起'}</u>　<small>想改邊界：在任一列按滑鼠右鍵</small></td></tr>`;
+    }
     if (t.pages.length > 1 && r.page !== lastPg){
-      if (!(fold && inHdr)) h += `<tr class="pagesep"><td colspan="${t.ncols + 1}">— 第 ${r.page} 頁 —</td></tr>`;
+      if (!(fold && inHdr) && !(ftrFold && inFtr)) h += `<tr class="pagesep"><td colspan="${t.ncols + 1}">— 第 ${r.page} 頁 —</td></tr>`;
       lastPg = r.page;
     }
-    const cls = (inHdr ? 'hdrrow' + (fold ? ' foldrow' : '') : '') + (ri === hdrEnd - 1 ? ' hdrlast' : '');
+    const cls = (inHdr ? 'hdrrow' + (fold ? ' foldrow' : '') : '') + (inFtr ? ' hdrrow ftrrow' + (ftrFold ? ' foldrow' : '') : '') + (ri === hdrEnd - 1 ? ' hdrlast' : '') + (ri === ftr ? ' ftrfirst' : '');
     h += `<tr data-r="${ri}"${cls ? ` class="${cls.trim()}"` : ''}><td class="rn" title="點一下選取整列"><button class="mini" data-act="merge" data-r="${ri}" title="併入上一列" aria-label="併入上一列" ${ri === 0 ? 'disabled style="visibility:hidden"' : ''}>↑</button><span class="rnum">${ri + 1}</span><button class="mini del" data-act="delrow" data-r="${ri}" title="刪除這一列" aria-label="刪除這一列">✕</button></td>`;
     r.cells.forEach((c, ci) => {
       if (mSkip[ri + ':' + ci]) return;
@@ -1191,7 +1252,7 @@ let drag = null;          // 拖曳中：{ mode:'cell'|'row'|'col', anchor, base
 let editing = null;       // 正在編輯的格子
 let lastMouse = null;
 
-function snapshot(t){ return JSON.stringify({ rows: t.rows, ncols: t.ncols, hdrEnd: t.hdrEnd || 0, merges: t.merges || [] }); }
+function snapshot(t){ return JSON.stringify({ rows: t.rows, ncols: t.ncols, hdrEnd: t.hdrEnd || 0, ftrStart: t.ftrStart, merges: t.merges || [] }); }
 function pushHistory(){
   const t = curTab(); t.history.push(snapshot(t));
   if (t.history.length > HISTORY_MAX) t.history.shift();
@@ -1202,7 +1263,7 @@ $('undoBtn').onclick = () => {
   const t = curTab(); if (!t || !t.history.length) return;
   stopEdit();
   const s = JSON.parse(t.history.pop());
-  t.rows = s.rows; t.ncols = s.ncols; t.hdrEnd = s.hdrEnd || 0; t.merges = s.merges || []; clearSel(); renderTable(); updateUndo();
+  t.rows = s.rows; t.ncols = s.ncols; t.hdrEnd = s.hdrEnd || 0; t.ftrStart = s.ftrStart == null ? t.rows.length : s.ftrStart; t.merges = s.merges || []; clearSel(); renderTable(); updateUndo();
 };
 
 /* ----- 選取範圍 ----- */
@@ -1422,6 +1483,7 @@ $('tbl').addEventListener('keydown', e => {
 // 刪掉或併走第 ri 列時：表頭邊界往上移、含這一列的合併儲存格取消、其餘的跟著位移
 function dropRow(t, ri){
   if (ri < (t.hdrEnd || 0)) t.hdrEnd--;
+  if (t.ftrStart != null && ri < t.ftrStart) t.ftrStart--;
   t.merges = (t.merges || []).filter(m => !(ri >= m.r0 && ri <= m.r1))
     .map(m => ri < m.r0 ? { c: m.c, r0: m.r0 - 1, r1: m.r1 - 1 } : m);
 }
@@ -1429,7 +1491,9 @@ function dropRow(t, ri){
 $('tbl').addEventListener('click', e => {
   if (e.target.closest('button')) return;
   const band = e.target.closest('tr.hdrband'); if (!band) return;
-  const t = curTab(); stopEdit(); t.hdrOpen = !t.hdrOpen; clearSel(); renderTable();
+  const t = curTab(); stopEdit();
+  if (band.dataset.part === 'ftr') t.ftrOpen = !t.ftrOpen; else t.hdrOpen = !t.hdrOpen;
+  clearSel(); renderTable();
 });
 $('tbl').addEventListener('click', e => {
   const b = e.target.closest('button[data-act]'); if (!b) return;
@@ -1461,6 +1525,12 @@ $('tbl').addEventListener('click', e => {
 const ctxMenu = document.createElement('div');
 ctxMenu.id = 'ctxMenu'; ctxMenu.hidden = true; document.body.appendChild(ctxMenu);
 function closeCtx(){ ctxMenu.hidden = true; ctxMenu.innerHTML = ''; }
+function setFtrStart(n){
+  const t = curTab(); if (!t) return;
+  pushHistory();
+  if (!(t.ftrStart < t.rows.length) && n < t.rows.length) t.ftrOpen = false;
+  t.ftrStart = n; clearSel(); renderTable();
+}
 function setHdrEnd(n){
   const t = curTab(); if (!t) return;
   pushHistory();
@@ -1475,6 +1545,8 @@ $('tbl').addEventListener('contextmenu', e => {
   const items = [];
   if (r > 0) items.push([`從第 ${r + 1} 列開始是品項（上面 ${r} 列當表頭資訊）`, () => setHdrEnd(r)]);
   if ((t.hdrEnd || 0) > 0) items.push(['不要表頭區：全部都是品項', () => setHdrEnd(0)]);
+  if (r > (t.hdrEnd || 0) + 1) items.push([`從第 ${r + 1} 列開始是表尾資訊（備註、經辦人、電話…，這一列和下面都收起）`, () => setFtrStart(r)]);
+  if (t.ftrStart < t.rows.length) items.push(['不要表尾區：下面全部都顯示', () => setFtrStart(t.rows.length)]);
   const m = td ? findMerge(t, +td.dataset.r, +td.dataset.c) : null;
   if (m) items.push(['取消這個合併儲存格', () => { pushHistory(); t.merges = t.merges.filter(x => x !== m); renderTable(); }]);
   ctxMenu.innerHTML = '';
@@ -1527,7 +1599,8 @@ $('dlBtn').onclick = () => {
     }
     ws['!cols'] = cols;
     const off = (t.hdrEnd || 0) > 0 && !t.hdrOpen ? t.hdrEnd : 0;
-    const mg = (t.merges || []).filter(m => m.r0 >= off).map(m => ({ s: { r: m.r0 - off, c: m.c }, e: { r: m.r1 - off, c: m.c } }));
+    const lastShown = (t.ftrStart != null && t.ftrStart < t.rows.length && !t.ftrOpen) ? t.ftrStart - 1 : t.rows.length - 1;
+    const mg = (t.merges || []).filter(m => m.r0 >= off && m.r1 <= lastShown).map(m => ({ s: { r: m.r0 - off, c: m.c }, e: { r: m.r1 - off, c: m.c } }));
     if (mg.length) ws['!merges'] = mg;
     XLSX.utils.book_append_sheet(wb, ws, sheetName(t.name, used));
   });
