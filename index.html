@@ -112,7 +112,7 @@ details summary{cursor:pointer;color:var(--sub);font-size:13px}
 </head>
 <body>
 <header>
-  <h1>PDF／圖片轉 Excel<span class="ver">v1.1.0</span></h1>
+  <h1>PDF／圖片轉 Excel<span class="ver">v1.1.1</span></h1>
   <p class="privacy">🔒 檔案只在您自己的瀏覽器裡處理，不會上傳到任何地方。</p>
 </header>
 <main>
@@ -588,10 +588,15 @@ async function ocrByBlocks(w, canvas, scale, pageNo, label){
     const lc = document.createElement('canvas'); lc.width = cw; lc.height = ch;
     const lx = lc.getContext('2d'); const id = lx.createImageData(cw, ch);
     id.data.fill(255);
+    let ink = 0;
     for (let y = l.y0; y < l.y1; y++) for (let x = l.x0; x < l.x1; x++){
       const v = g[y * W + x], o = ((y - l.y0 + pad) * cw + (x - l.x0 + pad)) * 4;
       id.data[o] = id.data[o + 1] = id.data[o + 2] = v;
+      if (v < 170) ink++;
     }
+    // 像文字的才算：又細又實心的直條（擦線後殘留的線頭）不是字，讀不出來就直接略過，不留「□」
+    const lw = l.x1 - l.x0, lh2 = l.y1 - l.y0;
+    const textLike = lw >= Hc * 0.6 && ink / (lw * lh2) < 0.75;
     lx.putImageData(id, 0, 0);
     // 讀到空白就換辦法再試：短字（如「單價」「運費」）有時縮小一點反而讀得出來
     const oneLine = (l.y1 - l.y0) < Hc * 1.8;
@@ -614,7 +619,7 @@ async function ocrByBlocks(w, canvas, scale, pageNo, label){
       }
     }
     if (!data){   // 這裡明明有字卻讀不出來：留一個「□」記號，免得複製出去時默默少一格
-      items.push({ page: pageNo, str: '□', x0: l.x0 / sf, x1: l.x1 / sf, cy: (l.y0 + l.y1) / 2 / sf, h: Hc / sf, conf: 0 });
+      if (textLike) items.push({ page: pageNo, str: '□', x0: l.x0 / sf, x1: l.x1 / sf, cy: (l.y0 + l.y1) / 2 / sf, h: Hc / sf, conf: 0 });
       continue;
     }
     // 每一行字當成一個儲存格：位置用切塊本身的範圍（辨識引擎給的單字位置常常不準）
@@ -628,7 +633,7 @@ async function ocrByBlocks(w, canvas, scale, pageNo, label){
         txt = !txt ? t : ((isCJK(txt.slice(-1)) || isCJK(t.charAt(0))) ? txt + t : txt + ' ' + t);
       }
       txt = fixCjkPunct(txt.trim());
-      if (!txt) txt = '□';
+      if (!txt){ if (!textLike) continue; txt = '□'; }
       let x0 = l.x0, x1 = l.x1, cy = (l.y0 + l.y1) / 2, lh = Math.min(Hc, l.y1 - l.y0);
       if (lines.length > 1 && ln.bbox){
         x0 = ln.bbox.x0 - pad + l.x0; x1 = ln.bbox.x1 - pad + l.x0;
