@@ -112,7 +112,7 @@ details summary{cursor:pointer;color:var(--sub);font-size:13px}
 </head>
 <body>
 <header>
-  <h1>PDF／圖片轉 Excel<span class="ver">v1.1.3</span></h1>
+  <h1>PDF／圖片轉 Excel<span class="ver">v1.2.0</span></h1>
   <p class="privacy">🔒 檔案只在您自己的瀏覽器裡處理，不會上傳到任何地方。</p>
 </header>
 <main>
@@ -150,6 +150,7 @@ details summary{cursor:pointer;color:var(--sub);font-size:13px}
         </label>
         <label><input type="checkbox" id="normChk" checked> 自動修正相似字（如「⽔」→「水」）</label>
         <label><input type="checkbox" id="numChk" checked> 金額／數量存成數字</label>
+        <label title="圖片辨識常把千分位逗號讀成句點，例如 364.320。勾選會自動改回 364,320，並標波浪底線請核對"><input type="checkbox" id="commaChk" checked> 句點改千分位逗號（圖片）</label>
         <span class="grow"></span>
         <button class="btn" id="undoBtn" disabled>↶ 復原</button>
         <button class="btn" id="copyBtn">📋 複製（貼到 Excel）</button>
@@ -358,9 +359,9 @@ async function processFile(f){
     }
   } else {
     const img = await loadImage(f);
+    // 小圖不要先放大（辨識前會用高品質方式一次放大到合適大小；先用低品質放大會變模糊）；太大的圖才縮小
     let s = 1;
-    if (img.naturalWidth < 1600) s = Math.min(3, 1600 / img.naturalWidth);
-    else if (img.naturalWidth > 3200) s = 3200 / img.naturalWidth;
+    if (img.naturalWidth > 3200) s = 3200 / img.naturalWidth;
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(img.naturalWidth * s); canvas.height = Math.round(img.naturalHeight * s);
     const ctx = canvas.getContext('2d');
@@ -565,7 +566,68 @@ function fixCjkPunct(s){
           .replace(/([一-鿿])\s*\.$/, '$1。')
           .replace(/([一-鿿])\s*:\s*/g, '$1：');
 }
-async function ocrByBlocks(w, canvas, scale, pageNo, label){
+/* ----- 新辨識引擎：PaddleOCR v5（ONNX，全部在瀏覽器內執行，檔案都在本站，不連外） ----- */
+let paddle = null, paddleFail = false;
+function loadScript(src){
+  return new Promise((res, rej) => {
+    const el = document.createElement('script'); el.src = src;
+    el.onload = res; el.onerror = () => rej(new Error('載入失敗：' + src));
+    document.head.appendChild(el);
+  });
+}
+async function fetchBuf(url, onProg){
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('下載失敗：' + url);
+  const total = +r.headers.get('content-length') || 0;
+  if (!r.body || !total) return r.arrayBuffer();
+  const rd = r.body.getReader(), chunks = []; let got = 0;
+  for (;;){
+    const { done, value } = await rd.read(); if (done) break;
+    chunks.push(value); got += value.length; onProg && onProg(got / total);
+  }
+  const out = new Uint8Array(got); let o = 0;
+  for (const c of chunks){ out.set(c, o); o += c.length; }
+  return out.buffer;
+}
+async function ensurePaddle(){
+  if (paddle) return paddle;
+  if (paddleFail) return null;
+  try{
+    showMask('第一次辨識圖片，正在載入辨識引擎（約 28 MB，只有第一次，之後不用再等）…', 0);
+    await tick();
+    const dir = BASE + 'vendor/paddleocr/';
+    if (!window.ort) await loadScript(dir + 'ort.wasm.min.js');
+    ort.env.wasm.wasmPaths = dir; ort.env.wasm.numThreads = 1;
+    const buf = await fetchBuf(dir + 'ch_PP-OCRv5_rec.onnx', p => showMask('載入辨識引擎…（只有第一次）', p * 0.9));
+    const dict = (await (await fetch(dir + 'ch_PP-OCRv5_dict.txt')).text()).split('\n').filter(x => x !== '');
+    showMask('啟動辨識引擎…', 0.95); await tick();
+    const session = await ort.InferenceSession.create(buf, { executionProviders: ['wasm'] });
+    paddle = { session, chars: ['', ...dict, ' '] };
+    return paddle;
+  }catch(err){
+    console.warn('新辨識引擎無法使用，改用舊引擎', err);
+    paddleFail = true; return null;
+  }
+}
+// 讀一行字（canvas：灰階白底，單行）。回傳 { text, conf(0~100) }
+async function paddleRead(pd, canvas){
+  const nh = 48, nw = Math.min(2400, Math.max(16, Math.round(canvas.width * nh / canvas.height)));
+  const rc = document.createElement('canvas'); rc.width = nw; rc.height = nh;
+  const rx = rc.getContext('2d'); rx.imageSmoothingQuality = 'high'; rx.drawImage(canvas, 0, 0, nw, nh);
+  const px = rx.getImageData(0, 0, nw, nh).data, plane = nh * nw, arr = new Float32Array(3 * plane);
+  for (let i = 0; i < plane; i++){ const v = (px[i * 4] / 255 - 0.5) / 0.5; arr[i] = v; arr[plane + i] = v; arr[2 * plane + i] = v; }
+  const out = await pd.session.run({ [pd.session.inputNames[0]]: new ort.Tensor('float32', arr, [1, 3, nh, nw]) });
+  const o = out[pd.session.outputNames[0]], T = o.dims[1], C = o.dims[2], d = o.data;
+  let prev = -1, text = '', sum = 0, n = 0;
+  for (let t = 0; t < T; t++){
+    let bi = 0, bv = -Infinity;
+    for (let k = 0; k < C; k++){ const v = d[t * C + k]; if (v > bv){ bv = v; bi = k; } }
+    if (bi !== prev && bi !== 0){ text += pd.chars[bi] || ''; sum += bv; n++; }
+    prev = bi;
+  }
+  return { text, conf: n ? Math.min(100, sum / n * 100) : 0 };
+}
+async function ocrByBlocks(pd, canvas, scale, pageNo, label){
   const W0 = canvas.width, H0 = canvas.height;
   const g0 = grayOf(canvas);
   const Hc0 = estimateCharH(g0, W0, H0);
@@ -609,6 +671,17 @@ async function ocrByBlocks(w, canvas, scale, pageNo, label){
     const textLike = lw >= Hc * 0.6 && ink / (lw * lh2) < 0.75;
     if (lw < Hc * 0.4 && ink / (lw * lh2) > 0.7) continue;     // 又細又實心的短條（色塊邊角、線頭）：不是字
     lx.putImageData(id, 0, 0);
+    // 單行的方塊先交給新引擎；緊貼的多行、或新引擎讀不出來，才用舊引擎
+    const tall = (l.y1 - l.y0) >= Hc * 1.8;
+    if (pd && !tall){
+      const r = await paddleRead(pd, lc);
+      const t = fixCjkPunct(r.text.trim().replace(NOISE_EDGE, '').trim());
+      if (t){
+        items.push({ page: pageNo, str: t, x0: l.x0 / sf, x1: l.x1 / sf, cy: (l.y0 + l.y1) / 2 / sf, h: Math.max(Math.min(Hc, lh2), Hc * 0.8) / sf, conf: Math.max(0, r.conf - 10) });   // 新引擎的把握度要低於約 85 才算「沒把握」（實測錯字多半落在 85 以下），換算成和舊引擎同一把尺
+        continue;
+      }
+    }
+    const w = await ensureOcr();
     // 讀到空白就換辦法再試：短字（如「單價」「運費」）有時縮小一點反而讀得出來
     const oneLine = (l.y1 - l.y0) < Hc * 1.8;
     const tries = oneLine ? [[1, '7'], [0.6, '7'], [1.4, '7'], [1, '8'], [0.6, '6']] : [[1, '6'], [0.6, '6'], [1, '7']];
@@ -656,16 +729,22 @@ async function ocrByBlocks(w, canvas, scale, pageNo, label){
   return items;
 }
 async function ocrCanvas(canvas, scale, pageNo, label){
-  const w = await ensureOcr();
   ocrLabel = label; showMask(label, 0);
   await tick();
+  const pd = await ensurePaddle();       // 新引擎；載入失敗會是 null，整個流程退回舊引擎
   let items = null; ocrInfo = null;
-  try { items = await ocrByBlocks(w, canvas, scale, pageNo, label); } catch (err){ console.warn('切塊辨識失敗，改用整頁辨識', err); }
+  try { items = await ocrByBlocks(pd, canvas, scale, pageNo, label); } catch (err){ console.warn('切塊辨識失敗，改用整頁辨識', err); }
   if (items && items.length) return items;
+  const w = await ensureOcr();
   return ocrWholePage(w, canvas, scale, pageNo);
 }
 
 /* ========== 排成表格 ========== */
+function fixThousands(s){
+  if (/^\d{1,3}([.,]\d{3})+[.,]\d{2}$/.test(s)){ const p = s.split(/[.,]/); const dec = p.pop(); return p.join(',') + '.' + dec; }   // 1.540.00 → 1,540.00
+  if (/^\d{1,3}([.,]\d{3})+$/.test(s) && s.includes('.')) return s.replace(/\./g, ',');                                              // 364.320 → 364,320
+  return s;
+}
 function joinStr(a, b, gap, h){
   const la = a.slice(-1), fb = b.charAt(0);
   if (isCJK(la) || isCJK(fb)) return a + b;
@@ -764,6 +843,25 @@ function buildRows(tab){
   tab.pairHits = pairHits;
   tab.offsetHint = pairHits >= 3 && pairHits >= rowCells.length * 0.3;
 
+  // 靠右對齊的數字欄（金額、數量、單價）：數字位數不同，左邊緣會參差不齊，會被誤認成好幾欄。
+  // 先依「右邊緣」把數字格子分群，每一群當成同一欄（把左邊緣視為一致）
+  {
+    const tolR = Hall * 0.9;
+    const nums = [];
+    for (const r of rowCells) for (const c of r.cells) if (isNumText(c.t.replace(/\s/g, ''))) nums.push(c);
+    nums.sort((a, b) => a.x1 - b.x1);
+    const clusters = [];
+    for (const c of nums){
+      const last = clusters[clusters.length - 1];
+      if (last && c.x1 - last.cells[last.cells.length - 1].x1 <= tolR) last.cells.push(c); else clusters.push({ cells: [c] });
+    }
+    for (const cl of clusters){
+      if (cl.cells.length < 3) continue;
+      const xr = median(cl.cells.map(c => c.x1)), mw = median(cl.cells.map(c => c.x1 - c.x0));
+      for (const c of cl.cells){ c.x0 = xr - mw; }     // 左邊緣視為「典型寬度」處，和標題文字的位置大致對得上
+    }
+  }
+
   // 欄位對齊：把各列格子的起始位置群聚成「欄」
   const tol = Hall * 0.8;
   const xs = rowCells.flatMap(r => r.cells.map(c => c.x0)).sort((a, b) => a - b);
@@ -785,9 +883,13 @@ function buildRows(tab){
       let col = 0;
       for (let k = 0; k < anchors.length; k++){ if (anchors[k] <= c.x0 + tol) col = k; }
       while (arr[col]) col++;
-      // 辨識常把「1,850」讀成「1.850」：這種寫法標成沒把握，並且匯出時不轉成數字
-      const sus = tab.pages[r.page - 1] && tab.pages[r.page - 1].mode === 'ocr' && /^\d{1,3}(\.\d{3})+$/.test(c.t.trim());
-      arr[col] = { t: c.t, conf: sus ? 0 : c.conf };
+      // 圖片辨識常把千分位的逗號讀成句點（1,850 → 1.850、1,540.00 → 1.540.00）：
+      // 開啟「句點改千分位逗號」就自動改回，並標成沒把握（波浪底線）請核對；沒開的話就只標沒把握，匯出時不轉成數字
+      const isOcrPage = tab.pages[r.page - 1] && tab.pages[r.page - 1].mode === 'ocr';
+      let ct = c.t, cf = c.conf;
+      if (isOcrPage && $('commaChk').checked){ const fx = fixThousands(ct.trim()); if (fx !== ct.trim()){ ct = fx; cf = 0; } }
+      const sus = isOcrPage && /^\d{1,3}(\.\d{3})+$/.test(ct.trim());
+      arr[col] = { t: ct, conf: sus ? 0 : cf };
     }
     ncols = Math.max(ncols, arr.length);
     out.push({ page: r.page, cells: arr });
@@ -899,6 +1001,7 @@ function rebuildAll(){
 }
 $('gapSel').addEventListener('change', e => { const prev = e.target.dataset.prev || '0.9'; if (!rebuildAll()) e.target.value = prev; else e.target.dataset.prev = e.target.value; });
 $('rowSel').addEventListener('change', e => { if (!rebuildAll()) e.target.value = e.target.value === 'loose' ? 'std' : 'loose'; });
+$('commaChk').addEventListener('change', e => { if (!rebuildAll()) e.target.checked = !e.target.checked; });
 $('normChk').addEventListener('change', e => { if (!rebuildAll()) e.target.checked = !e.target.checked; });
 
 /* ========== 畫面 ========== */
